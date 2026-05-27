@@ -1,0 +1,2594 @@
+
+import airsim
+import numpy as np
+import random
+import time
+import sys
+import os
+import subprocess
+sys.path.append(os.path.dirname(os.path.dirname(__file__)))
+from utils.action_clipping import clip_action
+from gymnasium import spaces
+
+class DroneEnv:
+    # Default name must match AirSim settings.json for that simulator instance.
+    DEFAULT_VEHICLE_NAME = "Drone1"
+
+    # --- UPDATE THESE PATHS ---
+    # Using your folder structure from the image
+    BASE_MAP_PATH = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), "map")
+    
+    EXE_PATHS = {
+        "T1_OpenUrbanGrid": os.path.join(BASE_MAP_PATH, "T1_OpenUrbanGrid", "WindowsNoEditor", "Blocks.exe"),
+        "T2_MediumCityBlocks": os.path.join(BASE_MAP_PATH, "T2_MediumCityBlocks", "WindowsNoEditor", "Blocks.exe"),
+        "T3_Wind": os.path.join(BASE_MAP_PATH, "T3_Wind", "WindowsNoEditor", "Blocks.exe")
+    }
+
+    def __init__(
+        self,
+        visualize_target=True,
+        ip="127.0.0.1",
+        port=41451,
+        vehicle_name=None,
+    ):
+        self.vehicle_name = vehicle_name or self.DEFAULT_VEHICLE_NAME
+        self.rpc_port = int(port)
+        ip_resolved = ip or "127.0.0.1"
+        self.airsim_ip = ip_resolved
+        # # If switch map is on
+        self.client = None
+
+        # If switch map is not on
+        # self.client = airsim.MultirotorClient(ip_resolved, self.rpc_port, timeout_value=300)
+        # self.client.confirmConnection()
+        # self.client.enableApiControl(True, vehicle_name=self.vehicle_name)
+        # self.client.armDisarm(True, vehicle_name=self.vehicle_name)
+
+        # Draw goal in the sim (AirSim simPlot*). Set False for headless / faster runs.
+        self.visualize_target = visualize_target
+        self.curriculum_progress = 1.0
+        # Bootstrap with a fixed goal for early training, then switch to curriculum.
+        # Target at X=8 straight down the forward corridor (confirmed clear path in Blocks map).
+        # 0.40 = first ~40% of max_episodes (e.g. 400/1000) on fixed goal for stronger success signal.
+        self.fixed_target = np.array([8.0, 0.0, -5.0], dtype=np.float32)
+        self.fixed_target_until_progress = 0.0
+
+        # Scenario information
+        self.scenario_id = "SCN-URB"
+        self.scenario_name = "AirSim Urban Environment"
+        self.current_map = ""
+        self._set_boundary_limits()
+
+        # ==========================================
+        # CURRICULUM PHASE TOGGLE 
+        # Change this to 1, 2, 3, or 4 to swap phases
+        # ==========================================
+        self.ACTIVE_PHASE = 9  
+        self.start_x = 0.0
+        self.start_y = 0.0
+        self.start_z = -5.0
+
+        # Episode tracking
+        self.previous_distance = None
+        self.current_step = 0
+        self.current_episode = 0
+        self.current_phase = "train"
+        # Will be dynamically overwritten by main_train.py mapping (200, 300, or 500)
+        self.max_steps = 200  # Safe Map 1 default initialization
+
+        # Target position
+        self.target = np.array([0.0, 0.0, -5.0])
+
+        # Wind
+        self.enable_wind = True
+        self.wind_strength = 1.5
+        self.wind = np.zeros(3, dtype=np.float32)
+
+        # Goal success threshold
+        self.goal_threshold = 3.0
+
+        # Action limits
+        self.max_velocity = 2.0
+
+        # Step duration
+        self.step_duration = 0.15
+        self.visualize_sensor_ray = visualize_target
+        # Sensor names must match those defined in AirSim settings.json.
+        # Aggregated by nearest valid reading — covers front, left, right, and down.
+        self.distance_sensor_names = ["Distance", "DistanceLeft", "DistanceRight", "DistanceBack", "DistanceDown"]
+        self.distance_sensor_max_range = 40.0
+        self._warned_distance_sensor_error = False
+        self._warned_distance_sensor_invalid = False
+        self._warned_missing_distance_sensors = set()
+        
+        # Cache obstacle readings to avoid duplicate sensor calls within one step
+        self._cached_obstacle_dist = self.distance_sensor_max_range
+        self._cached_sensor_readings = {}
+ 
+        self.observation_space = spaces.Box(
+            low=-np.inf, 
+            high=np.inf, 
+            shape=(26,), 
+            dtype=np.float32  
+        )
+
+        # ==========================================
+        # 📊 CONTINUOUS PATH & HOVER PERFORMANCE TRACKERS
+        # ==========================================
+        self.hover_counter = 0
+        self.continuous_start_x = None
+        self.continuous_start_y = None
+        self._prev_raw_action = np.zeros(4, dtype=np.float32)
+        self.prev_in_intersection = False
+
+    def _set_boundary_limits(self):
+            """Update safety boundaries based on the screenshot map names."""
+            
+            # Check for Map 3 specifically
+            if "T3_Wind" in self.current_map:
+                # Map 3: X = -34.0 to 130.0, Y = -65.0 to 65.0
+                self.x_min, self.x_max = -15.0, 170.0
+                self.y_min, self.y_max = -110.0, 110.0
+                # self.z_min, self.z_max = -8.5, -1.5
+                self.z_min, self.z_max = -12.0, -1.5
+                self.safety_distance = 7.0
+                print(f"🌐 Boundaries updated for T3_Wind:")
+                print(f"   X: {self.x_min} to {self.x_max}m | Y: {self.y_min} to {self.y_max}m | Z: {self.z_min} to {self.z_max}m")
+                
+            elif "T2_MediumCityBlocks" in self.current_map:
+                # Map 2: X = -22.0 to 65.0, Y = -54.0 to 54.0
+                self.x_min, self.x_max = -22.0, 65.0
+                self.y_min, self.y_max = -54.0, 54.0
+                # self.z_min, self.z_max = -8.5, -1.5
+                self.z_min, self.z_max = -12.0, -1.5
+                self.safety_distance = 5.0
+                print(f"🏙️ Boundaries updated for T2_City:")
+                print(f"   X: {self.x_min} to {self.x_max}m | Y: {self.y_min} to {self.y_max}m | Z: {self.z_min} to {self.z_max}m")
+                
+            else:
+                # Default for T1_OpenUrbanGrid (Map 1)
+                # Map 1: X = -15.0 to 42.0, Y = -11.0 to 12.0
+                self.x_min, self.x_max = -15.0, 42.0
+                self.y_min, self.y_max = -11.0, 12.0
+                # self.z_min, self.z_max = -8.5, -1.5
+                self.z_min, self.z_max = -12.0, -1.5
+                self.safety_distance = 5.0
+                print(f"⬜ Boundaries set for T1_Grid:")
+                print(f"   X: {self.x_min} to {self.x_max}m | Y: {self.y_min} to {self.y_max}m | Z: {self.z_min} to {self.z_max}m")
+
+    # def _is_safe_start_state(self):
+    #     """Validate startup state to reduce immediate OOB/reset episodes."""
+    #     state = self.client.getMultirotorState(vehicle_name=self.vehicle_name)
+    #     collision = self.client.simGetCollisionInfo(vehicle_name=self.vehicle_name).has_collided
+    #     pos = state.kinematics_estimated.position
+    #     vel = state.kinematics_estimated.linear_velocity
+
+    #     speed = float(
+    #         np.linalg.norm([vel.x_val, vel.y_val, vel.z_val])
+    #     )
+    #     near_origin_xy = abs(pos.x_val) < 1.5 and abs(pos.y_val) < 1.5
+    #     z_in_band = self.z_min <= float(pos.z_val) <= self.z_max
+    #     return (not collision) and (not self.is_out_of_bounds()) and near_origin_xy and z_in_band and speed < 0.8
+
+    def _is_safe_start_state(self):
+        """Validate startup state to reduce immediate OOB/reset episodes."""
+        state = self.client.getMultirotorState(vehicle_name=self.vehicle_name)
+        collision = self.client.simGetCollisionInfo(vehicle_name=self.vehicle_name).has_collided
+        pos = state.kinematics_estimated.position
+        vel = state.kinematics_estimated.linear_velocity
+
+        speed = float(np.linalg.norm([vel.x_val, vel.y_val, vel.z_val]))
+        
+        # 🚀 FIX: Check against dynamic start coordinates, not 0,0
+        near_start_xy = abs(pos.x_val - self.start_x) < 2.0 and abs(pos.y_val - self.start_y) < 2.0
+        z_in_band = self.z_min <= float(pos.z_val) <= self.z_max
+        
+        return (not collision) and (not self.is_out_of_bounds()) and near_start_xy and z_in_band and speed < 0.8
+    
+    def set_curriculum_progress(self, progress):
+        """Set normalized training progress in [0, 1] for target curriculum."""
+        self.curriculum_progress = float(np.clip(progress, 0.0, 1.0))
+        # Success-radius curriculum: keep 2.5 m gate longer, then tighten.
+        # Goal Threshold Curriculum
+        # if self.curriculum_progress < 0.40:
+        #     self.goal_threshold = 2.0
+        # elif self.curriculum_progress < 0.75:
+        #     self.goal_threshold = 2.5
+        if self.curriculum_progress < 0.75:
+            self.goal_threshold = 2.5
+        else:
+            self.goal_threshold = 2.0
+
+    def set_episode_context(self, episode, phase="train"):
+        """Attach episode metadata for richer runtime logs."""
+        self.current_episode = int(max(0, episode))
+        self.current_phase = str(phase)
+
+    # # Random Target (Stage 1)
+    # def _sample_target(self):
+    #         """Samples targets with a 4m dead-zone to force the drone to fly."""
+    #         p = self.curriculum_progress
+            
+    #         # 1. Determine X-Distance (Forward/Backward)
+    #         if p < 0.50:
+    #             dist_x_min, dist_x_max = -8.0, 10.0 
+    #         else:
+    #             dist_x_min, dist_x_max = -12.0, 35.0
+
+    #         # 2. Loop until we find a target far enough away
+    #         while True:
+    #             x = random.uniform(dist_x_min, dist_x_max)
+    #             y = random.uniform(-3.0, 3.0) 
+    #             z = random.uniform(self.z_min + 1.0, self.z_max - 1.0)
+                
+    #             # Calculate Euclidean distance from drone start (0, 0, -5)
+    #             # Assuming -5.0 is your starting altitude
+    #             dist_from_start = np.sqrt(x**2 + y**2 + (z - (-5.0))**2)
+                
+    #             # If distance is > 4.0 meters, it's a valid training target
+    #             if dist_from_start > 4.0:
+    #                 break
+
+    #         return np.array([x, y, z], dtype=np.float32)
+
+    # # Random Target (Stage 2 onwards)
+    # def _sample_target(self):
+    #         p = self.curriculum_progress
+            
+    #         # 1. Exact coordinate points for each map
+    #         map_points = {
+    #             "T1_OpenUrbanGrid": [
+    #                 [10.0, 2.0], [-5.5, 3.0], [-10.0, -4.0], [8.5, -5.5], 
+    #                 [8.0, 6.0], [19.0, -5.5],[39.0, 0.0], [36.0, -6.5], 
+    #                 [20.0, 5.6], [27.5, -5.1]
+    #             ],
+    #             "T2_MediumCityBlocks": [
+    #                 [25.0, 7.5], [57.0, 0.3], [47.5, 15.0], [42.0, -18.0], 
+    #                 [-10.5, 5.5], [-18.0, -7.5], [12.0, -12.0], [3.5, -26.0], 
+    #                 [15.3, -49.5], [10.0, 17.0], [21.5, 30.5], [5.0, 48.5]
+    #             ],
+    #             "T3_Wind": [
+    #                 [63.0, -30.5], [120.0, 7.3], [75.0, -55.0], [38.0, -45.0], 
+    #                 [80.5, 52.5], [0.0, -47.0], [69.0, 44.3], [0.7, 48.7], 
+    #             ]
+    #             # "T3_Wind": [
+    #             #     [-12.0, 110.0], [69.0, 85.0], [168.0, 105.0], [145.0, 52.0], 
+    #             #     [38.0, -50.0], [8.0, -105.0], [165.0, 0.0], [148.0, -52.0], 
+    #             #     [128.5, -102.5], [63.0, 19.5]
+    #             # ]
+    #         }
+
+    #         # 2. Select the correct list
+    #         points = map_points.get(self.current_map, map_points["T1_OpenUrbanGrid"])
+            
+    #         # 3. Choose one [x, y] pair randomly
+    #         chosen_xy = random.choice(points)
+    #         tx = chosen_xy[0] 
+    #         ty = chosen_xy[1] 
+
+    #         # 4. Generate random Z altitude within your defined Z limits (-8.5 to -1.5)
+    #         # Added a 0.5m buffer so it doesn't spawn exactly on the boundary line
+    #         tz = random.uniform(self.z_min + 1.0, self.z_max - 1.0)
+
+    #         return np.array([tx, ty, tz], dtype=np.float32)
+
+    # def _sample_target(self):
+    #     ep = self.current_episode
+        
+    #     # Default failsafes
+    #     dist_min, dist_max, self.max_steps = 10.0, 15.0, 500
+    #     tz = random.uniform(-6.0, -4.0)
+
+    #     # =========================================================
+    #     # 🎯 TARGET DISTANCE & ALTITUDE CURRICULUM
+    #     # =========================================================
+    #     if self.ACTIVE_PHASE == 1:
+    #         tz = random.uniform(-6.0, -4.0)
+    #         if ep <= 80:
+    #             dist_min, dist_max, self.max_steps = 5.0, 10.0, 350
+    #         elif ep <= 200:
+    #             dist_min, dist_max, self.max_steps = 10.0, 15.0, 550
+    #         elif ep <= 280:
+    #             dist_min, dist_max, self.max_steps = 10.0, 15.0, 600
+    #         elif ep <= 400:
+    #             dist_min, dist_max, self.max_steps = 15.0, 20.0, 800
+    #         else: # up to 520
+    #             dist_min, dist_max, self.max_steps = 20.0, 25.0, 1000
+
+    #     elif self.ACTIVE_PHASE == 2:
+    #         tz = random.uniform(-10.0, -8.0) # Phase 2 High Altitude
+    #         if ep <= 280:
+    #             dist_min, dist_max, self.max_steps = 10.0, 20.0, 800
+    #         else: # up to 560
+    #             dist_min, dist_max, self.max_steps = 15.0, 25.0, 1000
+
+    #     elif self.ACTIVE_PHASE == 3:
+    #         tz = random.uniform(-10.0, -8.0) # High Altitude
+    #         if ep <= 80:
+    #             dist_min, dist_max, self.max_steps = 10.0, 30.0, 1800
+    #         elif ep <= 200:
+    #             dist_min, dist_max = (30.0, 45.0) if random.random() < 0.9 else (15.0, 30.0)
+    #             self.max_steps = 2000
+    #         else:
+    #             dist_min, dist_max = (30.0, 60.0) if random.random() < 0.9 else (15.0, 30.0)
+    #             self.max_steps = 2200
+
+    #     elif self.ACTIVE_PHASE == 4:
+    #         tz = random.uniform(-6.0, -4.0) # Street Level
+    #         dist_min, dist_max, self.max_steps = 25.0, 55.0, 3000
+
+    #     elif self.ACTIVE_PHASE == 5:
+    #         tz = random.uniform(-6.0, -4.0)
+    #         if ep <= 320:
+    #             dist_min, dist_max, self.max_steps = 15.0, 30.0, 1500
+    #         elif ep <= 640:
+    #             dist_min, dist_max, self.max_steps = 25.0, 45.0, 2000
+    #         else: # up to 1000
+    #             dist_min, dist_max, self.max_steps = 35.0, 55.0, 2500
+
+    #     c = 2.0  # Safe clearance boundary from obstacles
+
+    #     map2_branch = None
+    #     if self.ACTIVE_PHASE == 3 and "T2_MediumCityBlocks" in self.current_map:
+    #         map2_branch = random.choice(["left", "right", "front", "back"])
+        
+    #     if map2_branch in ["left", "right"]:
+    #             dist_min = 47.0
+    #             dist_max = 52.0
+    #             self.max_steps = 2500
+
+    #     def is_valid_point(tx, ty):
+    #         if "T1_OpenUrbanGrid" in self.current_map:
+    #             # Road 1 Limits (Shrunk by 2m clearance)
+    #             if not (-19.3 + c <= tx <= 40.7 - c and -3.0 + c <= ty <= 3.0 - c):
+    #                 return False
+    #             return True
+                
+    #         elif "T2_MediumCityBlocks" in self.current_map:
+    #             in_horizontal = (5.8 + c <= tx <= 15.7 - c) and (-50.0 + c <= ty <= 50.0 - c)
+    #             in_vertical = (-39.2 + c <= tx <= 60.6 - c) and (-4.9 + c <= ty <= 4.9 - c)
+                
+    #             if self.ACTIVE_PHASE == 2:
+    #                 if not in_horizontal: return False
+    #                 return True
+                    
+    #             elif self.ACTIVE_PHASE == 3:
+    #                 # Phase 3: 50% Left (Y < -8), 50% Right (Y > 8)
+    #                 if map2_branch == "left" and not (in_horizontal and ty <= -8.0): return False
+    #                 if map2_branch == "right" and not (in_horizontal and ty >= 8.0): return False
+    #                 return True
+                    
+    #             elif self.ACTIVE_PHASE == 4:
+    #                 # Phase 4: Extreme zones only
+    #                 if map2_branch == "left" and not (in_horizontal and ty <= -45.0): return False
+    #                 if map2_branch == "right" and not (in_horizontal and ty >= 45.0): return False
+    #                 if map2_branch == "front" and not (in_vertical and tx >= 15.7 + c): return False
+    #                 if map2_branch == "back" and not (in_vertical and tx <= 5.8 - c): return False
+                    
+    #                 # Apply Dynamic Obstacle exclusions for Front road
+    #                 if map2_branch == "front":
+    #                     if (16.0 - c <= tx <= 60.0 + c) and (-4.6 - c <= ty <= -2.6 + c): return False # Dyn 2
+    #                     if (16.0 - c <= tx <= 60.0 + c) and (2.6 - c <= ty <= 4.6 + c): return False  # Dyn 3
+    #                 return True
+
+    #             elif self.ACTIVE_PHASE == 5:
+    #                 if not (in_vertical or in_horizontal): return False
+    #                 # Exclude Dynamic Obstacles globally for Map 2 in Phase 5
+    #                 if (7.5 - c <= tx <= 14.0 + c) and (-44.5 - c <= ty <= 44.5 + c): return False
+    #                 if (16.0 - c <= tx <= 60.0 + c) and (-4.6 - c <= ty <= -2.6 + c): return False
+    #                 if (16.0 - c <= tx <= 60.0 + c) and (2.6 - c <= ty <= 4.6 + c): return False
+    #                 return True
+                
+    #         # elif "T2_MediumCityBlocks" in self.current_map:
+    #         #     in_vertical = (-39.2 + c <= tx <= 60.6 - c) and (-4.9 + c <= ty <= 4.9 - c)
+    #         #     in_horizontal = (5.8 + c <= tx <= 15.7 - c) and (-50.0 + c <= ty <= 50.0 - c)
+    #         #     in_left  = (5.8 + c <= tx <= 15.7 - c) and (-50.0 + c <= ty <= -4.9 - c)
+    #         #     in_right = (5.8 + c <= tx <= 15.7 - c) and (4.9 + c <= ty <= 50.0 - c)
+    #         #     in_front = (15.7 + c <= tx <= 60.6 - c) and (-4.9 + c <= ty <= 4.9 - c)
+    #         #     in_back  = (-39.2 + c <= tx <= 5.8 - c) and (-4.9 + c <= ty <= 4.9 - c)
+
+    #         #     if self.ACTIVE_PHASE == 2:
+    #         #         if not in_horizontal: 
+    #         #             return False
+    #         #         return True
+                    
+    #         #     elif self.ACTIVE_PHASE == 3:
+                
+    #         #     # # 🚀 Force the target to spawn in the chosen 25% branch
+    #         #         # if map2_branch == "left":
+    #         #         #     if not (in_horizontal and ty < -4.9): return False
+    #         #         # elif map2_branch == "right":
+    #         #         #     if not (in_horizontal and ty > 4.9): return False
+    #         #         # elif map2_branch == "front":
+    #         #         #     if not (in_vertical and tx > 15.7): return False
+    #         #         # elif map2_branch == "back":
+    #         #         #     if not (in_vertical and tx < 5.8): return False
+    #         #         if map2_branch == "left" and not in_left: return False
+    #         #         if map2_branch == "right" and not in_right: return False
+    #         #         if map2_branch == "front" and not in_front: return False
+    #         #         if map2_branch == "back" and not in_back: return False
+                    
+    #         #         # 🚀 We keep Dynamic Obstacles 2 & 3 excluded ONLY for the Front Road
+    #         #         # (We ignore Dyn 1 because it spans 44m and makes distance sampling impossible)
+    #         #         # if map2_branch == "front":
+    #         #         #     if (16.0 - c <= tx <= 60.0 + c) and (-4.6 - c <= ty <= -2.6 + c): return False # Dyn 2
+    #         #         #     if (16.0 - c <= tx <= 60.0 + c) and (2.6 - c <= ty <= 4.6 + c): return False  # Dyn 3
+                        
+    #         #         # return True
+    #         #     else:
+    #         #         # Phase 4 uses full Map 2 minus dynamic obstacles
+    #         #         if not (in_vertical or in_horizontal):
+    #         #             return False
+                   
+    #         #     # Exclude Dynamic Obstacle Paths (Expanded by 2m clearance buffer)
+    #         #     if (7.5 - c <= tx <= 14.0 + c) and (-44.5 - c <= ty <= 44.5 + c): return False    # Dyn 1
+    #         #     if (16.0 - c <= tx <= 60.0 + c) and (-4.6 - c <= ty <= -2.6 + c): return False    # Dyn 2
+    #         #     if (16.0 - c <= tx <= 60.0 + c) and (2.6 - c <= ty <= 4.6 + c): return False     # Dyn 3
+                
+    #         #     return True
+                
+    #         elif "T3_Wind" in self.current_map:
+    #             # Placeholder for Map 3 tree logic implementation later
+    #             if not (self.x_min + c <= tx <= self.x_max - c and self.y_min + c <= ty <= self.y_max - c):
+    #                 return False
+    #             return True
+                
+    #         return False
+
+    #     # 3. Dynamic Rejection Sampling (Throw darts until a valid point is hit)
+    #     for _ in range(20000):
+    #         # Sample angle and 2D distance to guarantee curriculum requirements
+    #         angle = random.uniform(0, 2 * np.pi)
+    #         dist = random.uniform(dist_min, dist_max)
+            
+    #         # Translate from drone origin (0,0)
+    #         tx = self.start_x + dist * np.cos(angle)
+    #         ty = self.start_y + dist * np.sin(angle)
+            
+    #         if is_valid_point(tx, ty):
+    #             return np.array([tx, ty, tz], dtype=np.float32)
+                
+    #     # 4. Failsafe: Should boundaries be too restrictive to find a point
+    #     print(f"⚠️ Failed to sample target between {dist_min}m and {dist_max}m. Supplying fallback.")
+    #     return np.array([5.0, 0.0, tz], dtype=np.float32)
+    
+#     def _sample_target(self):
+#         ep = self.current_episode
+        
+#         # Default failsafes
+#         dist_min, dist_max, self.max_steps = 10.0, 15.0, 500
+#         tz = random.uniform(-6.0, -4.0)
+
+#         # =========================================================
+#         # 🎯 TARGET DISTANCE & ALTITUDE CURRICULUM (5 PHASES)
+#         # =========================================================
+#         if self.ACTIVE_PHASE == 1:
+#             tz = random.uniform(-6.0, -4.0)
+#             if ep <= 80: dist_min, dist_max, self.max_steps = 5.0, 10.0, 350
+#             elif ep <= 200: dist_min, dist_max, self.max_steps = 10.0, 15.0, 550
+#             elif ep <= 280: dist_min, dist_max, self.max_steps = 10.0, 15.0, 600
+#             elif ep <= 400: dist_min, dist_max, self.max_steps = 15.0, 20.0, 800
+#             else: dist_min, dist_max, self.max_steps = 20.0, 25.0, 1000
+
+#         elif self.ACTIVE_PHASE == 2:
+#             tz = random.uniform(-10.0, -8.0) # High Altitude
+#             if ep <= 280: dist_min, dist_max, self.max_steps = 10.0, 20.0, 800
+#             else: dist_min, dist_max, self.max_steps = 15.0, 25.0, 1000
+
+#         elif self.ACTIVE_PHASE == 3:
+#             tz = random.uniform(-10.0, -8.0) # High Altitude
+#             if ep <= 80:
+#                 dist_min, dist_max, self.max_steps = 10.0, 30.0, 1800
+#             elif ep <= 200:
+#                 dist_min, dist_max = (30.0, 45.0) if random.random() < 0.9 else (15.0, 30.0)
+#                 self.max_steps = 2200
+#             else:
+#                 dist_min, dist_max = (30.0, 60.0) if random.random() < 0.9 else (15.0, 30.0)
+#                 self.max_steps = 2200
+
+#         elif self.ACTIVE_PHASE == 4:
+#             tz = random.uniform(-6.0, -4.0)
+#             self.max_steps = 3000
+#             if ep <= 280:
+#                 dist_min, dist_max = 25.0, 45.0
+#             else:
+#                 dist_min, dist_max = 35.0, 60.0
+        
+#         elif self.ACTIVE_PHASE == 5:
+#             tz = random.uniform(-6.0, -4.0)
+#             dist_min, dist_max, self.max_steps = 35.0, 60.0, 3000
+#             if ep <= 240:
+#                 # Ep 1-240: 40% front, 60% back | 10% L, 10% R, 10% F, 70% B
+#                 map1_branch = random.choices(["front", "back"], weights=[0.4, 0.6])[0]
+#                 map2_branch = random.choices(["left", "right", "front", "back"], weights=[0.1, 0.1, 0.1, 0.7])[0]
+#             else:
+#                 # Ep 241-320: 50% front, 50% back | 25% L, 25% R, 25% F, 25% B
+#                 map1_branch = random.choices(["front", "back"], weights=[0.5, 0.5])[0]
+#                 map2_branch = random.choices(["left", "right", "front", "back"], weights=[0.25, 0.25, 0.25, 0.25])[0]
+
+#         elif self.ACTIVE_PHASE == 6:
+#             tz = random.uniform(-6.0, -4.0)
+#             dist_min, dist_max, self.max_steps = 10.0, 100.0, 3000
+#             map1_branch = random.choices(["front", "back"], weights=[0.5, 0.5])[0]
+#             map2_branch = random.choices(["left", "right", "front", "back"], weights=[0.25, 0.25, 0.25, 0.25])[0]
+        
+#         elif self.ACTIVE_PHASE == 7:
+#             tz = random.uniform(-6.0, -4.0)
+#             dist_min, dist_max = 10.0, 150.0  # Open up limits for Map 3 scaling
+#             self.max_steps = 3000 if ep <= 360 else 4000
+#             map1_branch = random.choices(["front", "back"], weights=[0.5, 0.5])[0]
+#             map2_branch = random.choices(["left", "right", "front", "back"], weights=[0.25, 0.25, 0.25, 0.25])[0]
+        
+#         elif self.ACTIVE_PHASE == 8:
+#             tz = random.uniform(-6.0, -4.0)
+#             dist_min, dist_max = 10.0, 150.0
+#             self.max_steps = 3000 if ep <= 280 else 4000
+#             map1_branch = random.choices(["front", "back"], weights=[0.5, 0.5])[0]
+#             map2_branch = random.choices(["left", "right", "front", "back"], weights=[0.25, 0.25, 0.25, 0.25])[0]
+            
+#         elif self.ACTIVE_PHASE == 9:
+#             tz = random.uniform(-6.0, -4.0)
+#             dist_min, dist_max = 10.0, 200.0
+#             map1_branch = random.choices(["front", "back"], weights=[0.5, 0.5])[0]
+#             map2_branch = random.choices(["left", "right", "front", "back"], weights=[0.25, 0.25, 0.25, 0.25])[0]
+#             if ep <= 200:
+#                 self.max_steps = 3000
+#             else:
+#                 self.max_steps = 4000
+
+#         elif self.ACTIVE_PHASE in [10, 11, 12]:
+#             tz = random.uniform(-6.0, -4.0)
+#             dist_min, dist_max = 10.0, 200.0
+#             self.max_steps = 5000
+#             map1_branch = random.choices(["front", "back"], weights=[0.5, 0.5])[0]
+#             map2_branch = random.choices(["left", "right", "front", "back"], weights=[0.25, 0.25, 0.25, 0.25])[0]
+
+#         c = 2.0  # Safe clearance boundary from obstacles
+
+#         map2_branch = None
+#         map1_branch = None
+
+#         if self.ACTIVE_PHASE >= 4 and "T1_OpenUrbanGrid" in self.current_map:
+#             # Map 1: 50/50 Front/Back for Phase 5-8 (Phase 4 is 60/40)
+#             w = [0.6, 0.4] if self.ACTIVE_PHASE == 4 else [0.5, 0.5]
+#             map1_branch = random.choices(["front", "back"], weights=w)[0]
+#             if map1_branch == "back":
+#                 dist_min, dist_max = 5.0, min(dist_max, 13.0) 
+#             elif map1_branch == "front":
+#                 dist_max = min(dist_max, 40.0)
+
+#         elif "T2_MediumCityBlocks" in self.current_map:
+#             if self.ACTIVE_PHASE == 3:
+#                 # Phase 3: 50% left, 50% right
+#                 map2_branch = random.choice(["left", "right"])
+#             elif self.ACTIVE_PHASE >= 4:
+#                 # Phase 4: 25% each direction
+#                 map2_branch = random.choice(["left", "right", "front", "back"])
+
+#             if map2_branch in ["left", "right"]:
+#                 dist_min, dist_max = max(dist_min, 45.0), max(dist_max, 55.0)
+#                 self.max_steps = max(self.max_steps, 2500)
+
+#         # 🚀 MAP 3 SMART BOX SAMPLER (Phases 6-8)
+#         if "T3_Wind" in self.current_map and self.ACTIVE_PHASE >= 6:
+#             # Format: (X_MIN, X_MAX, Y_MIN, Y_MAX) directly reflecting your requested boundaries
+#             boxes = {
+#                 "vr2_back": (15.8, 70.0, -5.0, 5.0),       # Vertical Road 2 - Back
+#                 "vr2_front": (70.0, 163.8, -5.0, 5.0),     # Vertical Road 2 - Front
+#                 "hr2_left": (63.2, 73.2, -104.5, 0.0),     # Horizontal road 2 - left
+#                 "hr2_right": (63.2, 73.2, 0.0, 104.5),     # Horizontal road 2 - right
+                
+#                 "hr1_left": (115.0, 125.0, -104.5, -20.0),   # (Involve 1 turn): Horizontal road 1 - left
+#                 "hr1_right": (115.0, 125.0, 20.0, 104.5),   # (Involve 1 turn): Horizontal road 1 - right
+                
+#                 "vr1_1": (125.0, 163.8, -59.8, -49.8),     # (Involve 2 turn): Vertical Road 1.1
+#                 "vr1_2": (73.0, 115.0, -59.8, -49.8),      # (Involve 2 turn): Vertical Road 1.2
+#                 "vr1_3": (15.8, 63.0, -59.8, -49.8),       # (Involve 2 turn): Vertical Road 1.3
+#                 "vr3_1": (125.0, 163.8, 49.8, 59.8),       # (Involve 2 turn): Vertical Road 3.1
+#                 "vr3_2": (73.0, 115.0, 49.8, 59.8),        # (Involve 2 turn): Vertical Road 3.2
+#                 "vr3_3": (15.8, 63.0, 49.8, 59.8)          # (Involve 2 turn): Vertical Road 3.3
+#             }
+            
+#             if self.ACTIVE_PHASE == 6:
+#                 choices = ['vr2_back', 'vr2_front', 'hr2_left', 'hr2_right']
+#                 weights = [0.25, 0.25, 0.25, 0.25]
+#             elif self.ACTIVE_PHASE == 7:
+#                 if ep <= 80: chosen_branch = 'vr2_back'
+#                 elif ep <= 160: chosen_branch = 'vr2_front'
+#                 elif ep <= 280: chosen_branch = 'hr2_left'
+#                 elif ep <= 360: chosen_branch = 'hr2_right'
+#                 elif ep <= 600: chosen_branch = 'hr1_left'
+#                 elif ep <= 840: chosen_branch = 'hr1_right'
+#                 else:
+#                     choices = ['vr2_back', 'vr2_front', 'hr2_left', 'hr2_right', 'hr1_left', 'hr1_right']
+#                     weights = [0.15, 0.15, 0.15, 0.15, 0.20, 0.20]
+#                     chosen_branch = random.choices(choices, weights=weights)[0]
+
+#             elif self.ACTIVE_PHASE == 8:
+#                 if ep <= 120: chosen_branch = 'hr2_left'
+#                 elif ep <= 280: chosen_branch = 'hr2_right'
+#                 elif ep <= 760: chosen_branch = 'hr1_left'
+#                 elif ep <= 1240: chosen_branch = 'hr1_right'
+#                 else:
+#                     choices = ['vr2_back', 'vr2_front', 'hr2_left', 'hr2_right', 'hr1_left', 'hr1_right']
+#                     weights = [0.15, 0.15, 0.15, 0.15, 0.20, 0.20]
+#                     chosen_branch = random.choices(choices, weights=weights)[0]
+                    
+#             elif self.ACTIVE_PHASE == 9:
+#                 if ep <= 200:
+#                     choices = ['vr2_back', 'vr2_front', 'hr2_left', 'hr2_right']
+#                     weights = [0.25, 0.25, 0.25, 0.25]
+#                     chosen_branch = random.choices(choices, weights=weights)[0]
+#                 elif ep <= 600:
+#                     choices = ['hr1_left', 'hr1_right']
+#                     weights = [0.50, 0.50]
+#                     chosen_branch = random.choices(choices, weights=weights)[0]
+#                 else:
+#                     choices = ['vr2_back', 'vr2_front', 'hr2_left', 'hr2_right', 'hr1_left', 'hr1_right']
+#                     weights = [0.15, 0.15, 0.15, 0.15, 0.20, 0.20]
+#                     chosen_branch = random.choices(choices, weights=weights)[0]
+                    
+#             elif self.ACTIVE_PHASE == 10:
+#                 if ep <= 780: chosen_branch = 'vr1_2'
+#                 elif ep <= 1560: chosen_branch = 'vr3_2'
+#                 else:
+#                     choices = ['vr2_back', 'vr2_front', 'hr2_left', 'hr2_right', 'hr1_left', 'hr1_right', 'vr1_2', 'vr3_2']
+#                     weights = [0.12, 0.12, 0.12, 0.12, 0.12, 0.12, 0.14, 0.14]
+#                     chosen_branch = random.choices(choices, weights=weights)[0]
+                    
+#             elif self.ACTIVE_PHASE == 11:
+#                 if ep <= 960: chosen_branch = 'vr1_1'
+#                 elif ep <= 1920: chosen_branch = 'vr3_1'
+#                 else:
+#                     choices = ['vr2_back', 'vr2_front', 'hr2_left', 'hr2_right', 'hr1_left', 'hr1_right', 'vr1_2', 'vr3_2', 'vr1_1', 'vr3_1']
+#                     weights = [0.10, 0.10, 0.10, 0.10, 0.10, 0.10, 0.10, 0.10, 0.10, 0.10]
+#                     chosen_branch = random.choices(choices, weights=weights)[0]
+
+#             elif self.ACTIVE_PHASE == 12:
+#                 if ep <= 1200: chosen_branch = 'vr1_3'
+#                 elif ep <= 2400: chosen_branch = 'vr3_3'
+#                 else:
+#                     choices = ['vr2_back', 'vr2_front', 'hr2_left', 'hr2_right', 'hr1_left', 'hr1_right', 'vr1_1', 'vr1_2', 'vr1_3', 'vr3_1', 'vr3_2', 'vr3_3']
+#                     weights = [0.08, 0.08, 0.09, 0.09, 0.09, 0.09, 0.08, 0.08, 0.08, 0.08, 0.08, 0.08]
+#                     chosen_branch = random.choices(choices, weights=weights)[0]
+
+#             xmin, xmax, ymin, ymax = boxes[chosen_branch]
+            
+#             # Direct sampling inside the chosen mathematical box
+#             for _ in range(5000):
+#                 tx = random.uniform(xmin + c, xmax - c)
+#                 ty = random.uniform(ymin + c, ymax - c)
+                
+#                 # Check Obstacle intersections
+#                 is_safe = True
+#                 if (117.3 <= tx <= 123.3) and (-99.5 <= ty <= -10.5): is_safe = False
+#                 elif (65.1 <= tx <= 71.1) and (-99.5 <= ty <= -10.5): is_safe = False
+#                 elif (117.3 <= tx <= 123.3) and (10.5 <= ty <= 99.5): is_safe = False
+#                 elif (7.5 <= tx <= 14.0) and (-109.5 <= ty <= 100.5): is_safe = False
+#                 elif (71.6 <= tx <= 115.6) and (-1.0 <= ty <= 1.0): is_safe = False
+#                 elif (71.6 <= tx <= 115.6) and (50.3 <= ty <= 52.3): is_safe = False
+#                 elif (71.6 <= tx <= 115.6) and (57.5 <= ty <= 59.5): is_safe = False
+#                 elif (16.0 <= tx <= 60.0) and (-4.6 <= ty <= -2.6): is_safe = False
+#                 elif (16.0 <= tx <= 60.0) and (2.6 <= ty <= 4.6): is_safe = False
+#                 elif (16.0 <= tx <= 60.0) and (54.0 <= ty <= 56.0): is_safe = False
+                
+#                 if is_safe:
+#                     return np.array([tx, ty, tz], dtype=np.float32)
+                
+#         def is_valid_point(tx, ty):
+#             if "T1_OpenUrbanGrid" in self.current_map:
+#                 if not (-19.3 + c <= tx <= 40.7 - c and -3.0 + c <= ty <= 3.0 - c): return False
+#                 # Applies to Phase 4, 5, 6, 7, and 8
+#                 if self.ACTIVE_PHASE >= 2:
+#                     if map1_branch == "front" and tx < 0.0: return False
+#                     if map1_branch == "back" and tx > 0.0: return False
+#                 return True
+            
+#             elif "T2_MediumCityBlocks" in self.current_map:
+#                 in_horizontal = (5.8 + c <= tx <= 15.7 - c) and (-50.0 + c <= ty <= 50.0 - c)
+#                 in_vertical = (-39.2 + c <= tx <= 60.6 - c) and (-4.9 + c <= ty <= 4.9 - c)
+                
+#                 if self.ACTIVE_PHASE == 2:
+#                     if not in_horizontal: return False
+#                     return True
+#                 elif self.ACTIVE_PHASE == 3:
+#                     if map2_branch == "left" and not (in_horizontal and ty <= -8.0): return False
+#                     if map2_branch == "right" and not (in_horizontal and ty >= 8.0): return False
+#                     return True
+#                 elif self.ACTIVE_PHASE >= 4:
+#                     # Uniform extreme edge logic applies cleanly to Phase 4 through 8
+#                     if map2_branch == "left" and not (in_horizontal and ty <= -45.0): return False
+#                     if map2_branch == "right" and not (in_horizontal and ty >= 45.0): return False
+#                     if map2_branch == "front" and not (in_vertical and tx >= 15.7 + c): return False
+#                     if map2_branch == "back" and not (in_vertical and tx <= 5.8 - c): return False
+                    
+#                     if map2_branch == "front":
+#                         if (16.0 - c <= tx <= 60.0 + c) and (-4.6 - c <= ty <= -2.6 + c): return False # Dyn 2
+#                         if (16.0 - c <= tx <= 60.0 + c) and (2.6 - c <= ty <= 4.6 + c): return False  # Dyn 3
+#                     return True
+
+#             elif "T3_Wind" in self.current_map:
+#                 # Failsafe: If Smart Box Sampler is bypassed, reject coordinates inside Dynamic Obstacles
+#                 if (117.3 <= tx <= 123.3) and (-99.5 <= ty <= -10.5): return False
+#                 if (65.1 <= tx <= 71.1) and (-99.5 <= ty <= -10.5): return False
+#                 if (117.3 <= tx <= 123.3) and (10.5 <= ty <= 99.5): return False
+#                 if (7.5 <= tx <= 14.0) and (-109.5 <= ty <= 100.5): return False
+                
+#                 if (71.6 <= tx <= 115.6) and (-1.0 <= ty <= 1.0): return False
+#                 if (71.6 <= tx <= 115.6) and (50.3 <= ty <= 52.3): return False
+#                 if (71.6 <= tx <= 115.6) and (57.5 <= ty <= 59.5): return False
+#                 if (16.0 <= tx <= 60.0) and (-4.6 <= ty <= -2.6): return False
+#                 if (16.0 <= tx <= 60.0) and (2.6 <= ty <= 4.6): return False
+#                 if (16.0 <= tx <= 60.0) and (54.0 <= ty <= 56.0): return False
+#                 return True
+                    
+#             return False
+# #         def is_valid_point(tx, ty):
+# #             if "T1_OpenUrbanGrid" in self.current_map:
+# #                 if not (-19.3 + c <= tx <= 40.7 - c and -3.0 + c <= ty <= 3.0 - c): return False
+                
+# #                 if self.ACTIVE_PHASE == 2 or self.ACTIVE_PHASE == 3 or self.ACTIVE_PHASE == 4:
+# #                     if map1_branch == "front" and tx < 0.0: return False
+# #                     if map1_branch == "back" and tx > 0.0: return False
+# #                     return True
+            
+# #             elif "T2_MediumCityBlocks" in self.current_map:
+# #                 in_horizontal = (5.8 + c <= tx <= 15.7 - c) and (-50.0 + c <= ty <= 50.0 - c)
+# #                 in_vertical = (-39.2 + c <= tx <= 60.6 - c) and (-4.9 + c <= ty <= 4.9 - c)
+                
+# #                 if self.ACTIVE_PHASE == 2:
+# #                     if not in_horizontal: return False
+# #                     return True
+            
+# #                 elif self.ACTIVE_PHASE == 3:
+# #                     # Phase 3: 50% Left (Y < -8), 50% Right (Y > 8)
+# #                     if map2_branch == "left" and not (in_horizontal and ty <= -8.0): return False
+# #                     if map2_branch == "right" and not (in_horizontal and ty >= 8.0): return False
+# #                     return True # MUST return true here so it skips the Phase 5 logic below!
+                    
+# #                 elif self.ACTIVE_PHASE == 4:
+# #                     # Phase 4: Extreme zones only
+# #                     if map2_branch == "left" and not (in_horizontal and ty <= -45.0): return False
+# #                     if map2_branch == "right" and not (in_horizontal and ty >= 45.0): return False
+# #                     if map2_branch == "front" and not (in_vertical and tx >= 15.7 + c): return False
+# #                     if map2_branch == "back" and not (in_vertical and tx <= 5.8 - c): return False
+# #                     if map2_branch == "front":
+# #                         if (16.0 - c <= tx <= 60.0 + c) and (-4.6 - c <= ty <= -2.6 + c): return False # Dyn 2
+# #                         if (16.0 - c <= tx <= 60.0 + c) and (2.6 - c <= ty <= 4.6 + c): return False  # Dyn 3
+# #                     return True
+                    
+# #                 elif self.ACTIVE_PHASE >= 5:
+# #                     if not (in_vertical or in_horizontal): return False
+# #                     if (7.5 - c <= tx <= 14.0 + c) and (-44.5 - c <= ty <= 44.5 + c): return False
+# #                     if (16.0 - c <= tx <= 60.0 + c) and (-4.6 - c <= ty <= -2.6 + c): return False
+# #                     if (16.0 - c <= tx <= 60.0 + c) and (2.6 - c <= ty <= 4.6 + c): return False
+# #                     return True
+                
+# #             elif "T3_Wind" in self.current_map:
+# # #           🚀 PHASE 5 MAP 3 LOGIC (Massive Grid)
+# #                 hr1 = (115.0 + c <= tx <= 125.0 - c) and (-104.5 + c <= ty <= 104.5 - c)
+# #                 hr2 = (63.2 + c <= tx <= 73.2 - c) and (-104.5 + c <= ty <= 104.5 - c)
+# #                 hr3 = (5.8 + c <= tx <= 15.8 - c) and (-104.5 + c <= ty <= 104.5 - c)
+                
+# #                 vr1 = (15.8 + c <= tx <= 163.8 - c) and (-59.8 + c <= ty <= -49.8 - c)
+# #                 vr2 = (15.8 + c <= tx <= 163.8 - c) and (-5.0 + c <= ty <= 5.0 - c)
+# #                 vr3 = (15.8 + c <= tx <= 163.8 - c) and (49.8 + c <= ty <= 59.8 - c)
+                
+# #                 if not (hr1 or hr2 or hr3 or vr1 or vr2 or vr3): return False
+                
+# #                 # ⚠️ DYNAMIC OBSTACLE EXCLUSIONS (c=2m removed to prevent math paradox)
+# #                 # Horizontal DYNAMIC OBSTACLE
+# #                 if (117.3 <= tx <= 123.3) and (-99.5 <= ty <= -10.5): return False
+# #                 if (65.1 <= tx <= 71.1) and (-99.5 <= ty <= -10.5): return False
+# #                 if (117.3 <= tx <= 123.3) and (10.5 <= ty <= 99.5): return False
+# #                 if (7.5 <= tx <= 14.0) and (-109.5 <= ty <= 100.5): return False
+# #                 # Vertical DYNAMIC OBSTACLE
+# #                 if (71.6 <= tx <= 115.6) and (-1.0 <= ty <= 1.0): return False
+# #                 if (71.6 <= tx <= 115.6) and (50.3 <= ty <= 52.3): return False
+# #                 if (71.6 <= tx <= 115.6) and (57.5 <= ty <= 59.5): return False
+# #                 if (16.0 <= tx <= 60.0) and (-4.6 <= ty <= -2.6): return False
+# #                 if (16.0 <= tx <= 60.0) and (2.6 <= ty <= 4.6): return False
+# #                 if (16.0 <= tx <= 60.0) and (54.0 <= ty <= 56.0): return False
+                
+# #             return False
+
+#         # Dynamic Rejection Sampling (Throw darts until a valid point is hit)
+#         for _ in range(20000):
+#             angle = random.uniform(0, 2 * np.pi)
+#             dist = random.uniform(dist_min, dist_max)
+            
+#             tx = self.start_x + dist * np.cos(angle)
+#             ty = self.start_y + dist * np.sin(angle)
+            
+#             if is_valid_point(tx, ty):
+#                 return np.array([tx, ty, tz], dtype=np.float32)
+                
+#         print(f"⚠️ Failed to sample target between {dist_min}m and {dist_max}m. Supplying fallback.")
+#         return np.array([self.start_x + 5.0, self.start_y, tz], dtype=np.float32)
+
+    def _sample_target(self):
+        ep = self.current_episode
+        
+        # Default failsafes
+        dist_min, dist_max, self.max_steps = 10.0, 15.0, 500
+        tz = random.uniform(-6.0, -4.0)
+
+        map1_branch = None
+        map2_branch = None
+
+        # =========================================================
+        # 🎯 TARGET DISTANCE & ALTITUDE CURRICULUM (5 PHASES)
+        # =========================================================
+        if self.ACTIVE_PHASE == 1:
+            tz = random.uniform(-6.0, -4.0)
+            if ep <= 80: dist_min, dist_max, self.max_steps = 5.0, 10.0, 350
+            elif ep <= 200: dist_min, dist_max, self.max_steps = 10.0, 15.0, 550
+            elif ep <= 280: dist_min, dist_max, self.max_steps = 10.0, 15.0, 600
+            elif ep <= 400: dist_min, dist_max, self.max_steps = 15.0, 20.0, 800
+            else: dist_min, dist_max, self.max_steps = 20.0, 25.0, 1000
+
+        elif self.ACTIVE_PHASE == 2:
+            tz = random.uniform(-10.0, -8.0) # High Altitude
+            if ep <= 280: dist_min, dist_max, self.max_steps = 10.0, 20.0, 800
+            else: dist_min, dist_max, self.max_steps = 15.0, 25.0, 1000
+
+        elif self.ACTIVE_PHASE == 3:
+            tz = random.uniform(-10.0, -8.0) # High Altitude
+            if ep <= 80:
+                dist_min, dist_max, self.max_steps = 10.0, 30.0, 1800
+            elif ep <= 200:
+                dist_min, dist_max = (30.0, 45.0) if random.random() < 0.9 else (15.0, 30.0)
+                self.max_steps = 2200
+            else:
+                dist_min, dist_max = (30.0, 60.0) if random.random() < 0.9 else (15.0, 30.0)
+                self.max_steps = 2200
+
+        elif self.ACTIVE_PHASE == 4:
+            tz = random.uniform(-6.0, -4.0)
+            self.max_steps = 3000
+            if ep <= 280:  dist_min, dist_max = 25.0, 45.0
+            else: dist_min, dist_max = 35.0, 60.0
+        
+        elif self.ACTIVE_PHASE == 5:
+            tz = random.uniform(-6.0, -4.0)
+            dist_min, dist_max, self.max_steps = 35.0, 60.0, 3000
+            if ep <= 240:
+                map1_branch = random.choices(["front", "back"], weights=[0.4, 0.6])[0]
+                map2_branch = random.choices(["left", "right", "front", "back"], weights=[0.1, 0.1, 0.1, 0.7])[0]
+            else:
+                map1_branch = random.choices(["front", "back"], weights=[0.5, 0.5])[0]
+                map2_branch = random.choices(["left", "right", "front", "back"], weights=[0.25, 0.25, 0.25, 0.25])[0]
+
+        elif self.ACTIVE_PHASE == 6:
+            tz = random.uniform(-6.0, -4.0)
+            dist_min, dist_max, self.max_steps = 10.0, 100.0, 3000
+            map1_branch = random.choices(["front", "back"], weights=[0.5, 0.5])[0]
+            map2_branch = random.choices(["left", "right", "front", "back"], weights=[0.25, 0.25, 0.25, 0.25])[0]
+        
+        elif self.ACTIVE_PHASE == 7:
+            tz = random.uniform(-6.0, -4.0)
+            dist_min, dist_max = 10.0, 150.0  
+            self.max_steps = 3000 if ep <= 360 else 4000
+            map1_branch = random.choices(["front", "back"], weights=[0.5, 0.5])[0]
+            map2_branch = random.choices(["left", "right", "front", "back"], weights=[0.25, 0.25, 0.25, 0.25])[0]
+        
+        elif self.ACTIVE_PHASE == 8:
+            tz = random.uniform(-6.0, -4.0)
+            dist_min, dist_max = 10.0, 150.0
+            self.max_steps = 3000 if ep <= 280 else 4000
+            map1_branch = random.choices(["front", "back"], weights=[0.5, 0.5])[0]
+            map2_branch = random.choices(["left", "right", "front", "back"], weights=[0.25, 0.25, 0.25, 0.25])[0]
+            
+        elif self.ACTIVE_PHASE == 9:
+            tz = random.uniform(-6.0, -4.0)
+            dist_min, dist_max = 10.0, 200.0
+            map1_branch = random.choices(["front", "back"], weights=[0.5, 0.5])[0]
+            map2_branch = random.choices(["left", "right", "front", "back"], weights=[0.25, 0.25, 0.25, 0.25])[0]
+            self.max_steps = 3000 if ep <= 200 else 4000
+
+        elif self.ACTIVE_PHASE in [10, 11, 12]:
+            tz = random.uniform(-6.0, -4.0)
+            dist_min, dist_max = 10.0, 200.0
+            self.max_steps = 5000
+            map1_branch = random.choices(["front", "back"], weights=[0.5, 0.5])[0]
+            map2_branch = random.choices(["left", "right", "front", "back"], weights=[0.25, 0.25, 0.25, 0.25])[0]
+
+        c = 2.0  # Safe clearance boundary
+
+        if self.ACTIVE_PHASE >= 4 and "T1_OpenUrbanGrid" in self.current_map:
+            w = [0.6, 0.4] if self.ACTIVE_PHASE == 4 else [0.5, 0.5]
+            map1_branch = random.choices(["front", "back"], weights=w)[0]
+            if map1_branch == "back": dist_min, dist_max = 5.0, min(dist_max, 13.0) 
+            elif map1_branch == "front": dist_max = min(dist_max, 40.0)
+
+        elif "T2_MediumCityBlocks" in self.current_map:
+            if self.ACTIVE_PHASE == 3: map2_branch = random.choice(["left", "right"])
+            elif self.ACTIVE_PHASE >= 4: map2_branch = random.choice(["left", "right", "front", "back"])
+
+            if map2_branch in ["left", "right"]:
+                dist_min, dist_max = max(dist_min, 45.0), max(dist_max, 55.0)
+                self.max_steps = max(self.max_steps, 2500)
+
+        # 🚀 STREAMLINED MAP 3 BOX SAMPLER (Removes performance bottleneck)
+        if "T3_Wind" in self.current_map and self.ACTIVE_PHASE >= 6:
+            boxes = {
+                "vr2_back": (15.8, 70.0, -5.0, 5.0),
+                "vr2_front": (70.0, 163.8, -5.0, 5.0),
+                "hr2_left": (63.2, 73.2, -104.5, 0.0),
+                "hr2_right": (63.2, 73.2, 0.0, 104.5),
+                "hr1_left": (115.0, 125.0, -104.5, -20.0),
+                "hr1_right": (115.0, 125.0, 20.0, 104.5),
+                "vr1_1": (125.0, 163.8, -59.8, -49.8),
+                "vr1_2": (73.0, 115.0, -59.8, -49.8),
+                "vr1_3": (15.8, 63.0, -59.8, -49.8),
+                "vr3_1": (125.0, 163.8, 49.8, 59.8),
+                "vr3_2": (73.0, 115.0, 49.8, 59.8),
+                "vr3_3": (15.8, 63.0, 49.8, 59.8)
+            }
+            
+            if self.ACTIVE_PHASE == 6:
+                chosen_branch = random.choices(['vr2_back', 'vr2_front', 'hr2_left', 'hr2_right'], [0.25, 0.25, 0.25, 0.25])[0]
+            elif self.ACTIVE_PHASE == 7:
+                if ep <= 80: chosen_branch = 'vr2_back'
+                elif ep <= 160: chosen_branch = 'vr2_front'
+                elif ep <= 280: chosen_branch = 'hr2_left'
+                elif ep <= 360: chosen_branch = 'hr2_right'
+                elif ep <= 600: chosen_branch = 'hr1_left'
+                elif ep <= 840: chosen_branch = 'hr1_right'
+                else: chosen_branch = random.choices(['vr2_back', 'vr2_front', 'hr2_left', 'hr2_right', 'hr1_left', 'hr1_right'], [0.15, 0.15, 0.15, 0.15, 0.20, 0.20])[0]
+            elif self.ACTIVE_PHASE == 8:
+                if ep <= 120: chosen_branch = 'hr2_left'
+                elif ep <= 280: chosen_branch = 'hr2_right'
+                elif ep <= 760: chosen_branch = 'hr1_left'
+                elif ep <= 1240: chosen_branch = 'hr1_right'
+                else: chosen_branch = random.choices(['vr2_back', 'vr2_front', 'hr2_left', 'hr2_right', 'hr1_left', 'hr1_right'], [0.15, 0.15, 0.15, 0.15, 0.20, 0.20])[0]
+            elif self.ACTIVE_PHASE == 9:
+                if ep <= 200: chosen_branch = random.choices(['vr2_back', 'vr2_front', 'hr2_left', 'hr2_right'], [0.25, 0.25, 0.25, 0.25])[0]
+                elif ep <= 600: chosen_branch = random.choices(['hr1_left', 'hr1_right'], [0.50, 0.50])[0]
+                else: chosen_branch = random.choices(['vr2_back', 'vr2_front', 'hr2_left', 'hr2_right', 'hr1_left', 'hr1_right'], [0.15, 0.15, 0.15, 0.15, 0.20, 0.20])[0]
+            elif self.ACTIVE_PHASE == 10:
+                if ep <= 780: chosen_branch = 'vr1_2'
+                elif ep <= 1560: chosen_branch = 'vr3_2'
+                else: chosen_branch = random.choices(['vr2_back', 'vr2_front', 'hr2_left', 'hr2_right', 'hr1_left', 'hr1_right', 'vr1_2', 'vr3_2'], [0.12, 0.12, 0.12, 0.12, 0.12, 0.12, 0.14, 0.14])[0]
+            elif self.ACTIVE_PHASE == 11:
+                if ep <= 960: chosen_branch = 'vr1_1'
+                elif ep <= 1920: chosen_branch = 'vr3_1'
+                else: chosen_branch = random.choices(['vr2_back', 'vr2_front', 'hr2_left', 'hr2_right', 'hr1_left', 'hr1_right', 'vr1_2', 'vr3_2', 'vr1_1', 'vr3_1'], [0.10]*10)[0]
+            elif self.ACTIVE_PHASE == 12:
+                if ep <= 1200: chosen_branch = 'vr1_3'
+                elif ep <= 2400: chosen_branch = 'vr3_3'
+                else: chosen_branch = random.choices(['vr2_back', 'vr2_front', 'hr2_left', 'hr2_right', 'hr1_left', 'hr1_right', 'vr1_1', 'vr1_2', 'vr1_3', 'vr3_1', 'vr3_2', 'vr3_3'], [0.08, 0.08, 0.09, 0.09, 0.09, 0.09, 0.08, 0.08, 0.08, 0.08, 0.08, 0.08])[0]
+
+            xmin, xmax, ymin, ymax = boxes[chosen_branch]
+            tx = random.uniform(xmin + c, xmax - c)
+            ty = random.uniform(ymin + c, ymax - c)
+            return np.array([tx, ty, tz], dtype=np.float32)
+
+        def is_valid_point(tx, ty):
+            if "T1_OpenUrbanGrid" in self.current_map:
+                if not (-19.3 + c <= tx <= 40.7 - c and -3.0 + c <= ty <= 3.0 - c): return False
+                if self.ACTIVE_PHASE >= 2:
+                    if map1_branch == "front" and tx < 0.0: return False
+                    if map1_branch == "back" and tx > 0.0: return False
+                return True
+            elif "T2_MediumCityBlocks" in self.current_map:
+                in_horizontal = (5.8 + c <= tx <= 15.7 - c) and (-50.0 + c <= ty <= 50.0 - c)
+                in_vertical = (-39.2 + c <= tx <= 60.6 - c) and (-4.9 + c <= ty <= 4.9 - c)
+                if self.ACTIVE_PHASE == 2:
+                    return in_horizontal
+                elif self.ACTIVE_PHASE == 3:
+                    if map2_branch == "left" and not (in_horizontal and ty <= -8.0): return False
+                    if map2_branch == "right" and not (in_horizontal and ty >= 8.0): return False
+                    return True
+                elif self.ACTIVE_PHASE >= 4:
+                    if map2_branch == "left" and not (in_horizontal and ty <= -45.0): return False
+                    if map2_branch == "right" and not (in_horizontal and ty >= 45.0): return False
+                    if map2_branch == "front" and not (in_vertical and tx >= 15.7 + c): return False
+                    if map2_branch == "back" and not (in_vertical and tx <= 5.8 - c): return False
+                    if map2_branch == "front":
+                        if (16.0 - c <= tx <= 60.0 + c) and (-4.6 - c <= ty <= -2.6 + c): return False 
+                        if (16.0 - c <= tx <= 60.0 + c) and (2.6 - c <= ty <= 4.6 + c): return False  
+                    return True
+            elif "T3_Wind" in self.current_map:
+                return True
+            return False
+
+        for _ in range(20000):
+            angle = random.uniform(0, 2 * np.pi)
+            dist = random.uniform(dist_min, dist_max)
+            tx = self.start_x + dist * np.cos(angle)
+            ty = self.start_y + dist * np.sin(angle)
+            if is_valid_point(tx, ty):
+                return np.array([tx, ty, tz], dtype=np.float32)
+                
+        print(f"⚠️ Failed to sample target between {dist_min}m and {dist_max}m. Supplying fallback.")
+        return np.array([self.start_x + 5.0, self.start_y, tz], dtype=np.float32)
+
+    def reset(self):
+        """Reset AirSim environment and start a new episode."""
+        print("Resetting environment...")
+        self.client.confirmConnection()
+        self.client.reset()
+        time.sleep(0.4)
+        self.client.enableApiControl(True, vehicle_name=self.vehicle_name)
+        self.client.armDisarm(True, vehicle_name=self.vehicle_name)
+
+        self.start_x, self.start_y = 0.0, 0.0
+        self.start_z = -5.0
+
+        if self.ACTIVE_PHASE in [2, 3]:
+            self.start_z = -9.0 
+            
+        if self.ACTIVE_PHASE == 2 and "T2_MediumCityBlocks" in self.current_map:
+            if random.random() < 0.5:
+                self.start_x, self.start_y = 10.0, -46.0  
+            else:
+                self.start_x, self.start_y = -10.0, -46.0 
+        
+        if self.ACTIVE_PHASE >= 5 and "T3_Wind" in self.current_map:
+            if self.continuous_start_x is not None:
+                self.start_x = self.continuous_start_x
+                self.start_y = self.continuous_start_y
+            else:
+                self.start_x, self.start_y = 70.0, 0.0
+        
+        # start_pose = airsim.Pose(airsim.Vector3r(self.start_x, self.start_y, self.start_z), airsim.to_quaternion(0, 0, 0))
+        # self.client.simSetVehiclePose(start_pose, True, vehicle_name=self.vehicle_name)
+        # time.sleep(0.4)
+        
+        # self.client.armDisarm(True, vehicle_name=self.vehicle_name)
+        # self.client.moveToPositionAsync(self.start_x, self.start_y, self.start_z, 3, timeout_sec=2, vehicle_name=self.vehicle_name).join()
+        
+        # 🚀 FIX: Convert variables into native Python floats inside Vector3r to stop the crash
+        start_pose = airsim.Pose(airsim.Vector3r(float(self.start_x), float(self.start_y), float(self.start_z)), airsim.to_quaternion(0, 0, 0))
+        self.client.simSetVehiclePose(start_pose, True, vehicle_name=self.vehicle_name)
+        time.sleep(0.4)
+        
+        self.client.armDisarm(True, vehicle_name=self.vehicle_name)
+        # 🚀 FIX: Apply float conversions to the flight navigation coordinates here as well
+        self.client.moveToPositionAsync(float(self.start_x), float(self.start_y), float(self.start_z), 3, timeout_sec=2, vehicle_name=self.vehicle_name).join()
+
+        self.client.rotateToYawAsync(0.0, timeout_sec=1, vehicle_name=self.vehicle_name).join()
+        self.client.hoverAsync(vehicle_name=self.vehicle_name).join()
+        time.sleep(0.15)
+
+        for attempt in range(3):
+            if self._is_safe_start_state():
+                break
+            self.client.moveToPositionAsync(self.start_x, self.start_y, self.start_z, 2, timeout_sec=1, vehicle_name=self.vehicle_name).join()
+            self.client.rotateToYawAsync(0.0, timeout_sec=1, vehicle_name=self.vehicle_name).join()
+            self.client.hoverAsync(vehicle_name=self.vehicle_name).join()
+            time.sleep(0.15)
+
+        self.target = self._sample_target()
+        self.hover_counter = 0  
+        self.prev_in_intersection = False
+
+        context = f"[{self.current_phase} ep {self.current_episode}] "
+        print(f"{context}🎯 New Target spawned at: X={self.target[0]:.2f}, Y={self.target[1]:.2f}, Z={self.target[2]:.2f}")
+        self._draw_target_marker()
+
+        self.previous_distance = self.get_distance_to_target()
+        self.current_step = 0
+
+        # =========================================================
+        # 🌪️ WIND CURRICULUM
+        # =========================================================
+        ep = self.current_episode
+        self.enable_wind = True
+        active_strength = 0.0
+
+        if self.ACTIVE_PHASE == 1:
+            if ep <= 200: self.enable_wind = False
+            else: active_strength = random.uniform(0.3, 0.5)
+        elif self.ACTIVE_PHASE == 2:
+            if ep <= 280: active_strength = random.uniform(0.3, 0.5)
+            else: active_strength = random.uniform(0.5, 0.8)
+        elif self.ACTIVE_PHASE == 3:
+            if ep <= 200: active_strength = random.uniform(0.3, 0.5)
+            else: active_strength = random.uniform(0.5, 0.8)
+        elif self.ACTIVE_PHASE == 4:
+            rand_w = random.random()
+            if rand_w < 0.20: self.enable_wind = False
+            elif rand_w < 0.50: active_strength = random.uniform(0.3, 0.5)
+            else: active_strength = random.uniform(0.5, 0.8)
+        elif self.ACTIVE_PHASE == 5:
+            rand_w = random.random()
+            if ep <= 120:
+                if rand_w < 0.70: self.enable_wind = False
+                else: active_strength = random.uniform(0.3, 0.5)
+            elif ep <= 240:
+                if rand_w < 0.50: active_strength = random.uniform(0.3, 0.5)
+                else: active_strength = random.uniform(0.5, 0.8)
+            else:
+                if rand_w < 0.20: self.enable_wind = False
+                elif rand_w < 0.50: active_strength = random.uniform(0.3, 0.5)
+                else: active_strength = random.uniform(0.5, 0.8)
+        elif self.ACTIVE_PHASE == 6:
+            rand_w = random.random()
+            if rand_w < 0.20: self.enable_wind = False
+            elif rand_w < 0.50: active_strength = random.uniform(0.3, 0.5)
+            else: active_strength = random.uniform(0.5, 0.8)
+        elif self.ACTIVE_PHASE == 7:
+            if ep <= 360 or ep > 840:
+                rand_w = random.random()
+                if rand_w < 0.15: self.enable_wind = False
+                elif rand_w < 0.45: active_strength = random.uniform(0.3, 0.5)
+                elif rand_w < 0.80: active_strength = random.uniform(0.5, 0.8)
+                else: active_strength = random.uniform(0.8, 1.0)
+            elif 361 <= ep <= 440 or 601 <= ep <= 680:
+                rand_w = random.random()
+                if rand_w < 0.50: self.enable_wind = False
+                else: active_strength = random.uniform(0.3, 0.5)
+            elif 441 <= ep <= 520 or 681 <= ep <= 760:
+                active_strength = random.uniform(0.5, 0.8)
+            elif 521 <= ep <= 600 or 761 <= ep <= 840:
+                active_strength = random.uniform(0.8, 1.0)
+        elif self.ACTIVE_PHASE == 8:
+            if ep <= 280 or ep > 1240:
+                rand_w = random.random()
+                if rand_w < 0.15: self.enable_wind = False
+                elif rand_w < 0.45: active_strength = random.uniform(0.3, 0.5)
+                elif rand_w < 0.80: active_strength = random.uniform(0.5, 0.8)
+                else: active_strength = random.uniform(0.8, 1.0)
+            elif 281 <= ep <= 440 or 761 <= ep <= 920:
+                rand_w = random.random()
+                if rand_w < 0.50: self.enable_wind = False
+                else: active_strength = random.uniform(0.3, 0.5)
+            elif 441 <= ep <= 600 or 921 <= ep <= 1080:
+                active_strength = random.uniform(0.5, 0.8)
+            elif 601 <= ep <= 760 or 1081 <= ep <= 1240:
+                active_strength = random.uniform(0.8, 1.0)
+        elif self.ACTIVE_PHASE == 9:
+            if ep <= 200:
+                if random.random() < 0.50: self.enable_wind = False
+                else: active_strength = random.uniform(0.3, 0.5)
+            elif ep <= 600:
+                if ep <= 330:
+                    if random.random() < 0.50: self.enable_wind = False
+                    else: active_strength = random.uniform(0.3, 0.5)
+                elif ep <= 460:
+                    active_strength = random.uniform(0.5, 0.8)
+                else:
+                    active_strength = random.uniform(0.8, 1.0)
+            else:
+                rand_w = random.random()
+                if rand_w < 0.15: self.enable_wind = False
+                elif rand_w < 0.45: active_strength = random.uniform(0.3, 0.5)
+                elif rand_w < 0.80: active_strength = random.uniform(0.5, 0.8)
+                else: active_strength = random.uniform(0.8, 1.0)
+        elif self.ACTIVE_PHASE == 10:
+            if ep > 1560:
+                rand_w = random.random()
+                if rand_w < 0.15: self.enable_wind = False
+                elif rand_w < 0.45: active_strength = random.uniform(0.3, 0.5)
+                elif rand_w < 0.80: active_strength = random.uniform(0.5, 0.8)
+                else: active_strength = random.uniform(0.8, 1.0)
+            else:
+                cycle_ep = (ep - 1) % 780 + 1
+                if cycle_ep <= 260:
+                    if random.random() < 0.50: self.enable_wind = False
+                    else: active_strength = random.uniform(0.3, 0.5)
+                elif cycle_ep <= 520:
+                    active_strength = random.uniform(0.5, 0.8)
+                else:
+                    active_strength = random.uniform(0.8, 1.0)
+        elif self.ACTIVE_PHASE == 11:
+            if ep > 1920:
+                rand_w = random.random()
+                if rand_w < 0.15: self.enable_wind = False
+                elif rand_w < 0.45: active_strength = random.uniform(0.3, 0.5)
+                elif rand_w < 0.80: active_strength = random.uniform(0.5, 0.8)
+                else: active_strength = random.uniform(0.8, 1.0)
+            else:
+                cycle_ep = (ep - 1) % 960 + 1
+                if cycle_ep <= 320:
+                    if random.random() < 0.50: self.enable_wind = False
+                    else: active_strength = random.uniform(0.3, 0.5)
+                elif cycle_ep <= 640:
+                    active_strength = random.uniform(0.5, 0.8)
+                else:
+                    active_strength = random.uniform(0.8, 1.0)
+        elif self.ACTIVE_PHASE == 12:
+            if ep > 2400:
+                rand_w = random.random()
+                if rand_w < 0.15: self.enable_wind = False
+                elif rand_w < 0.45: active_strength = random.uniform(0.3, 0.5)
+                elif rand_w < 0.80: active_strength = random.uniform(0.5, 0.8)
+                else: active_strength = random.uniform(0.8, 1.0)
+            else:
+                cycle_ep = (ep - 1) % 1200 + 1
+                if cycle_ep <= 400:
+                    if random.random() < 0.50: self.enable_wind = False
+                    else: active_strength = random.uniform(0.3, 0.5)
+                elif cycle_ep <= 800:
+                    active_strength = random.uniform(0.5, 0.8)
+                else:
+                    active_strength = random.uniform(0.8, 1.0)
+
+        if self.enable_wind:
+            wind_angle = random.uniform(0, 2 * np.pi)
+            vx = active_strength * np.cos(wind_angle)
+            vy = active_strength * np.sin(wind_angle)
+            z_force = active_strength * 0.12
+            vz = random.uniform(-z_force, z_force)
+            self.wind = np.array([vx, vy, vz], dtype=np.float32)
+            print(f"🌪️ Wind: {active_strength:.2f} m/s | Angle: {np.degrees(wind_angle):.1f}°")
+        else:
+            self.wind = np.zeros(3, dtype=np.float32)
+
+        self._prev_action = np.zeros(4, dtype=np.float32)
+        self._prev_raw_action = np.zeros(4, dtype=np.float32)
+        return self.get_state()
+    
+    # def reset(self):
+    #     """Reset AirSim environment and start a new episode."""
+    #     print("Resetting environment...")
+    #     self.client.confirmConnection()
+    #     self.client.reset()
+    #     time.sleep(0.5)
+    #     self.client.enableApiControl(True, vehicle_name=self.vehicle_name)
+    #     self.client.armDisarm(True, vehicle_name=self.vehicle_name)
+
+    #     self.start_x, self.start_y = 0.0, 0.0
+    #     self.start_z = -5.0
+
+    #     # Phase 2 and 3: High Altitude
+    #     if self.ACTIVE_PHASE in [2, 3]:
+    #         self.start_z = -9.0 
+            
+    #     # Map 2 Specific Teleports (Phase 2 Only - as requested in curriculum)
+    #     if self.ACTIVE_PHASE == 2 and "T2_MediumCityBlocks" in self.current_map:
+    #         if random.random() < 0.5:
+    #             self.start_x, self.start_y = 10.0, -46.0  # Right side
+    #         else:
+    #             self.start_x, self.start_y = -10.0, -46.0 # Left side
+        
+    #     if self.ACTIVE_PHASE >= 5 and "T3_Wind" in self.current_map:
+    #         self.start_x, self.start_y = 70.0, 0.0
+        
+    #     # 1. TELEPORT drone instantly BEFORE engaging physics
+    #     start_pose = airsim.Pose(airsim.Vector3r(self.start_x, self.start_y, self.start_z), airsim.to_quaternion(0, 0, 0))
+    #     self.client.simSetVehiclePose(start_pose, True, vehicle_name=self.vehicle_name)
+    #     time.sleep(0.5)
+        
+    #     # 2. Start motors safely
+    #     self.client.armDisarm(True, vehicle_name=self.vehicle_name)
+    #     self.client.moveToPositionAsync(self.start_x, self.start_y, self.start_z, 3, timeout_sec=2, vehicle_name=self.vehicle_name).join()
+    #     self.client.rotateToYawAsync(0.0, timeout_sec=1, vehicle_name=self.vehicle_name).join()
+    #     self.client.hoverAsync(vehicle_name=self.vehicle_name).join()
+    #     time.sleep(0.2)
+
+    #     for attempt in range(3):
+    #         if self._is_safe_start_state():
+    #             break
+    #         self.client.moveToPositionAsync(self.start_x, self.start_y, self.start_z, 2, timeout_sec=1, vehicle_name=self.vehicle_name).join()
+    #         self.client.rotateToYawAsync(0.0, timeout_sec=1, vehicle_name=self.vehicle_name).join()
+    #         self.client.hoverAsync(vehicle_name=self.vehicle_name).join()
+    #         time.sleep(0.15)
+    #         if attempt == 2:
+    #             print("⚠️ Startup state not fully stable after retries; continuing episode.")
+
+    #     self.target = self._sample_target()
+
+    #     context = f"[{self.current_phase} ep {self.current_episode}] "
+    #     print(f"{context}🎯 New Target spawned at: X={self.target[0]:.2f}, Y={self.target[1]:.2f}, Z={self.target[2]:.2f}")
+    #     self._draw_target_marker()
+
+    #     self.previous_distance = self.get_distance_to_target()
+    #     self.current_step = 0
+
+    #     # =========================================================
+    #     # 🌪️ WIND CURRICULUM (Phases 1-5)
+    #     # =========================================================
+    #     ep = self.current_episode
+    #     self.enable_wind = True
+    #     active_strength = 0.0
+
+    #     if self.ACTIVE_PHASE == 1:
+    #         if ep <= 200: self.enable_wind = False
+    #         else: active_strength = random.uniform(0.3, 0.5)
+    #     elif self.ACTIVE_PHASE == 2:
+    #         if ep <= 280: active_strength = random.uniform(0.3, 0.5)
+    #         else: active_strength = random.uniform(0.5, 0.8)
+    #     elif self.ACTIVE_PHASE == 3:
+    #         if ep <= 200: active_strength = random.uniform(0.3, 0.5)
+    #         else: active_strength = random.uniform(0.5, 0.8)
+    #     elif self.ACTIVE_PHASE == 4:
+    #         rand_w = random.random()
+    #         if rand_w < 0.20:
+    #             self.enable_wind = False
+    #         elif rand_w < 0.50:
+    #             active_strength = random.uniform(0.3, 0.5)
+    #         else:
+    #             active_strength = random.uniform(0.5, 0.8)
+    #     elif self.ACTIVE_PHASE == 5:
+    #         if ep <= 120:
+    #             if rand_w < 0.70: self.enable_wind = False
+    #             else: active_strength = random.uniform(0.3, 0.5)
+    #         elif ep <= 240:
+    #             if rand_w < 0.50: active_strength = random.uniform(0.3, 0.5)
+    #             else: active_strength = random.uniform(0.5, 0.8)
+    #         else:
+    #             if rand_w < 0.20: self.enable_wind = False
+    #             elif rand_w < 0.50: active_strength = random.uniform(0.3, 0.5)
+    #             else: active_strength = random.uniform(0.5, 0.8)
+        
+    #     elif self.ACTIVE_PHASE == 6:
+    #         if rand_w < 0.20: self.enable_wind = False
+    #         elif rand_w < 0.50: active_strength = random.uniform(0.3, 0.5)
+    #         else: active_strength = random.uniform(0.5, 0.8)
+            
+    #     elif self.ACTIVE_PHASE == 7:
+    #         if ep <= 360 or ep > 840:
+    #             rand_w = random.random()
+    #             if rand_w < 0.15: self.enable_wind = False
+    #             elif rand_w < 0.45: active_strength = random.uniform(0.3, 0.5)
+    #             elif rand_w < 0.80: active_strength = random.uniform(0.5, 0.8)
+    #             else: active_strength = random.uniform(0.8, 1.0)
+    #         elif 361 <= ep <= 440 or 601 <= ep <= 680:
+    #             rand_w = random.random()
+    #             if rand_w < 0.50: self.enable_wind = False
+    #             else: active_strength = random.uniform(0.3, 0.5)
+    #         elif 441 <= ep <= 520 or 681 <= ep <= 760:
+    #             active_strength = random.uniform(0.5, 0.8)
+    #         elif 521 <= ep <= 600 or 761 <= ep <= 840:
+    #             active_strength = random.uniform(0.8, 1.0)
+
+    #     elif self.ACTIVE_PHASE == 8:
+    #         if ep <= 280 or ep > 1240:
+    #             rand_w = random.random()
+    #             if rand_w < 0.15: self.enable_wind = False
+    #             elif rand_w < 0.45: active_strength = random.uniform(0.3, 0.5)
+    #             elif rand_w < 0.80: active_strength = random.uniform(0.5, 0.8)
+    #             else: active_strength = random.uniform(0.8, 1.0)
+    #         elif 281 <= ep <= 440 or 761 <= ep <= 920:
+    #             rand_w = random.random()
+    #             if rand_w < 0.50: self.enable_wind = False
+    #             else: active_strength = random.uniform(0.3, 0.5)
+    #         elif 441 <= ep <= 600 or 921 <= ep <= 1080:
+    #             active_strength = random.uniform(0.5, 0.8)
+    #         elif 601 <= ep <= 760 or 1081 <= ep <= 1240:
+    #             active_strength = random.uniform(0.8, 1.0)
+
+    #     elif self.ACTIVE_PHASE == 9:
+    #         if ep <= 200:
+    #             if random.random() < 0.50: self.enable_wind = False
+    #             else: active_strength = random.uniform(0.3, 0.5)
+    #         elif ep <= 600:
+    #             if ep <= 330:
+    #                 if random.random() < 0.50: self.enable_wind = False
+    #                 else: active_strength = random.uniform(0.3, 0.5)
+    #             elif ep <= 460:
+    #                 active_strength = random.uniform(0.5, 0.8)
+    #             else:
+    #                 active_strength = random.uniform(0.8, 1.0)
+    #         else:
+    #             rand_w = random.random()
+    #             if rand_w < 0.15: self.enable_wind = False
+    #             elif rand_w < 0.45: active_strength = random.uniform(0.3, 0.5)
+    #             elif rand_w < 0.80: active_strength = random.uniform(0.5, 0.8)
+    #             else: active_strength = random.uniform(0.8, 1.0)
+
+    #     elif self.ACTIVE_PHASE == 10:
+    #         if ep > 1560:
+    #             rand_w = random.random()
+    #             if rand_w < 0.15: self.enable_wind = False
+    #             elif rand_w < 0.45: active_strength = random.uniform(0.3, 0.5)
+    #             elif rand_w < 0.80: active_strength = random.uniform(0.5, 0.8)
+    #             else: active_strength = random.uniform(0.8, 1.0)
+    #         else:
+    #             cycle_ep = (ep - 1) % 780 + 1
+    #             if cycle_ep <= 260:
+    #                 if random.random() < 0.50: self.enable_wind = False
+    #                 else: active_strength = random.uniform(0.3, 0.5)
+    #             elif cycle_ep <= 520:
+    #                 active_strength = random.uniform(0.5, 0.8)
+    #             else:
+    #                 active_strength = random.uniform(0.8, 1.0)
+
+    #     elif self.ACTIVE_PHASE == 11:
+    #         if ep > 1920:
+    #             rand_w = random.random()
+    #             if rand_w < 0.15: self.enable_wind = False
+    #             elif rand_w < 0.45: active_strength = random.uniform(0.3, 0.5)
+    #             elif rand_w < 0.80: active_strength = random.uniform(0.5, 0.8)
+    #             else: active_strength = random.uniform(0.8, 1.0)
+    #         else:
+    #             cycle_ep = (ep - 1) % 960 + 1
+    #             if cycle_ep <= 320:
+    #                 if random.random() < 0.50: self.enable_wind = False
+    #                 else: active_strength = random.uniform(0.3, 0.5)
+    #             elif cycle_ep <= 640:
+    #                 active_strength = random.uniform(0.5, 0.8)
+    #             else:
+    #                 active_strength = random.uniform(0.8, 1.0)
+
+    #     elif self.ACTIVE_PHASE == 12:
+    #         if ep > 2400:
+    #             rand_w = random.random()
+    #             if rand_w < 0.15: self.enable_wind = False
+    #             elif rand_w < 0.45: active_strength = random.uniform(0.3, 0.5)
+    #             elif rand_w < 0.80: active_strength = random.uniform(0.5, 0.8)
+    #             else: active_strength = random.uniform(0.8, 1.0)
+    #         else:
+    #             cycle_ep = (ep - 1) % 1200 + 1
+    #             if cycle_ep <= 400:
+    #                 if random.random() < 0.50: self.enable_wind = False
+    #                 else: active_strength = random.uniform(0.3, 0.5)
+    #             elif cycle_ep <= 800:
+    #                 active_strength = random.uniform(0.5, 0.8)
+    #             else:
+    #                 active_strength = random.uniform(0.8, 1.0)
+        
+    #     if self.enable_wind:
+    #         wind_angle = random.uniform(0, 2 * np.pi)
+    #         vx = active_strength * np.cos(wind_angle)
+    #         vy = active_strength * np.sin(wind_angle)
+    #         z_force = active_strength * 0.12
+    #         vz = random.uniform(-z_force, z_force)
+    #         self.wind = np.array([vx, vy, vz], dtype=np.float32)
+    #         print(f"🌪️ Wind: {active_strength:.2f} m/s | Angle: {np.degrees(wind_angle):.1f}°")
+    #     else:
+    #         self.wind = np.zeros(3, dtype=np.float32)
+
+    #     self._prev_action = np.zeros(4, dtype=np.float32)
+    #     return self.get_state()
+    
+    # def reset(self):
+    #     """
+    #     Reset AirSim environment and start a new episode.
+    #     Returns the initial state.
+    #     """
+    #     print("Resetting environment...")
+
+    #     self.client.confirmConnection()
+    #     self.client.reset()
+    #     time.sleep(0.5)
+    #     self.client.enableApiControl(True, vehicle_name=self.vehicle_name)
+    #     self.client.armDisarm(True, vehicle_name=self.vehicle_name)
+
+    #     # =========================================================
+    #     # 🚁 STARTING POSITION & ALTITUDE CURRICULUM
+    #     # =========================================================
+    #     self.start_x, self.start_y = 0.0, 0.0
+    #     self.start_z = -5.0  # Default 5m height (Phases 1, 3, 4)
+
+    #     if self.ACTIVE_PHASE == 2:
+    #         self.start_z = -6.5 # Phase 2: High Altitude (10m)
+            
+    #         # Map 2 specific spawn locations (50/50 split)
+    #         if self.ACTIVE_PHASE == 2 and "T2_MediumCityBlocks" in self.current_map:
+    #             if random.random() < 0.5:
+    #                 self.start_x, self.start_y = 10.0, -30.0 # South end of road
+    #             else:
+    #                 self.start_x, self.start_y = 10.0, 30.0  # North end of road
+        
+    #     # 1. TELEPORT the drone instantly BEFORE engaging physics
+    #     start_pose = airsim.Pose(airsim.Vector3r(self.start_x, self.start_y, self.start_z), airsim.to_quaternion(0, 0, 0))
+    #     self.client.simSetVehiclePose(start_pose, True, vehicle_name=self.vehicle_name)
+    #     time.sleep(0.5)
+        
+    #     # 2. Start motors now that we are safely placed
+    #     self.client.armDisarm(True, vehicle_name=self.vehicle_name)
+
+    #     # 3. 🚀 FIX: Added `timeout_sec=2` so the script NEVER freezes if it bumps a wall!
+    #     self.client.moveToPositionAsync(self.start_x, self.start_y, self.start_z, 3, timeout_sec=2, vehicle_name=self.vehicle_name).join()
+    #     self.client.rotateToYawAsync(0.0, timeout_sec=1, vehicle_name=self.vehicle_name).join()
+    #     self.client.hoverAsync(vehicle_name=self.vehicle_name).join()
+    #     time.sleep(0.2)
+
+    #     # Retry a few quick corrections if startup state is still not safe.
+    #     for attempt in range(3):
+    #         if self._is_safe_start_state():
+    #             break
+    #         # 🚀 Added timeouts here too!
+    #         self.client.moveToPositionAsync(self.start_x, self.start_y, self.start_z, 2, timeout_sec=1, vehicle_name=self.vehicle_name).join()
+    #         self.client.rotateToYawAsync(0.0, timeout_sec=1, vehicle_name=self.vehicle_name).join()
+    #         self.client.hoverAsync(vehicle_name=self.vehicle_name).join()
+    #         time.sleep(0.15)
+    #         if attempt == 2:
+    #             print("⚠️ Startup state not fully stable after retries; continuing episode.")
+
+    #     # Curriculum-driven target sampling (easy to hard).
+    #     self.target = self._sample_target()
+
+    #     # # 🚀 FIX: TELEPORT the drone instantly to the coordinates instead of flying there
+    #     # start_pose = airsim.Pose(airsim.Vector3r(self.start_x, self.start_y, self.start_z), airsim.to_quaternion(0, 0, 0))
+    #     # self.client.simSetVehiclePose(start_pose, True, vehicle_name=self.vehicle_name)
+    #     # time.sleep(0.1)
+        
+    #     # # Take off and move to stable starting altitude
+    #     # self.client.takeoffAsync(vehicle_name=self.vehicle_name).join()
+    #     # # self.client.moveToPositionAsync(0, 0, -5, 3, vehicle_name=self.vehicle_name).join()
+    #     # self.client.moveToPositionAsync(self.start_x, self.start_y, self.start_z, 3, vehicle_name=self.vehicle_name).join()
+    #     # # Standardize heading and let dynamics settle before the first control step.
+    #     # self.client.rotateToYawAsync(0.0, vehicle_name=self.vehicle_name).join()
+    #     # self.client.hoverAsync(vehicle_name=self.vehicle_name).join()
+    #     # time.sleep(0.2)
+
+    #     # # Take off safely at the origin FIRST so AirSim doesn't freeze
+    #     # self.client.takeoffAsync(vehicle_name=self.vehicle_name).join()
+        
+    #     # # teleport the drone instantly to the Phase 2 coordinates
+    #     # start_pose = airsim.Pose(airsim.Vector3r(self.start_x, self.start_y, self.start_z), airsim.to_quaternion(0, 0, 0))
+    #     # self.client.simSetVehiclePose(start_pose, True, vehicle_name=self.vehicle_name)
+    #     # time.sleep(0.2)
+        
+    #     # # Stabilize exactly at the new spawn location
+    #     # self.client.moveToPositionAsync(self.start_x, self.start_y, self.start_z, 3, vehicle_name=self.vehicle_name).join()
+    #     # self.client.rotateToYawAsync(0.0, vehicle_name=self.vehicle_name).join()
+    #     # self.client.hoverAsync(vehicle_name=self.vehicle_name).join()
+    #     # time.sleep(0.2)
+
+    #     # # Retry a few quick corrections if startup state is still not safe.
+    #     # for attempt in range(3):
+    #     #     if self._is_safe_start_state():
+    #     #         break
+    #     #     self.client.moveToPositionAsync(0, 0, -5, 2, vehicle_name=self.vehicle_name).join()
+    #     #     # self.client.rotateToYawAsync(0.0, vehicle_name=self.vehicle_name).join()
+    #     #     # self.client.hoverAsync(vehicle_name=self.vehicle_name).join()
+    #     #     self.client.moveToPositionAsync(self.start_x, self.start_y, self.start_z, 2, vehicle_name=self.vehicle_name).join()
+    #     #     self.client.rotateToYawAsync(0.0, vehicle_name=self.vehicle_name).join()
+    #     #     time.sleep(0.15)
+    #     #     if attempt == 2:
+    #     #         print("⚠️ Startup state not fully stable after retries; continuing episode.")
+
+    #     # # Curriculum-driven target sampling (easy to hard).
+    #     # self.target = self._sample_target()
+
+    #     context = f"[{self.current_phase} ep {self.current_episode}] "
+    #     print(
+    #         f"{context}🎯 New Target spawned at: "
+    #         f"X={self.target[0]:.2f}, Y={self.target[1]:.2f}, Z={self.target[2]:.2f}"
+    #     )
+
+    #     self._draw_target_marker()
+
+    #     self.previous_distance = self.get_distance_to_target()
+    #     self.current_step = 0
+
+    #     # # # Wind Condition (Map 1 & 2)
+    #     # # HARDENING CURRICULUM (Expanded for Map 2 Stability)
+    #     # p = self.curriculum_progress
+        
+    #     # if p < 0.1:
+    #     #     # --- STAGE 1: CALM (Ep 1–200) ---
+    #     #     self.enable_wind = False
+    #     #     self.wind_strength = 0.0
+    #     # elif p < 0.6:
+    #     #     # --- STAGE 2: BREEZE (Ep 201–1200) ---
+    #     #     # Much longer time to learn at 0.1 to 2.0 m/s
+    #     #     self.wind_strength = 0.1 + (p - 0.1) * 3.8 
+    #     #     self.enable_wind = True
+    #     # else:
+    #     #     # --- STAGE 3: STORM (Ep 1201–2000) ---
+    #     #     # Gradually reach 4.0 m/s
+    #     #     self.wind_strength = 2.0 + (p - 0.6) * 5.0
+    #     #     self.enable_wind = True
+
+    #     # # Add on two lines (When not using wind) (Stage 1 & 2)
+    #     # self.enable_wind = False
+    #     # self.wind_strength = 0.0
+
+    #     # # # Wind Condition
+    #     # # if self.enable_wind:
+    #     # #     # 1. Randomize the strength from 0 to your current max (3.5)
+    #     # #     # This prevents "Ghost Wind" syndrome
+    #     # #     active_strength = random.uniform(0.0, self.wind_strength) 
+            
+    #     # #     # 2. Use your new Circular Vector logic
+    #     # #     wind_angle = random.uniform(0, 2 * np.pi)
+    #     # #     vx = active_strength * np.cos(wind_angle)
+    #     # #     vy = active_strength * np.sin(wind_angle)
+            
+    #     # #     z_force = active_strength * 0.3
+    #     # #     vz = random.uniform(-z_force, z_force)
+            
+    #     # #     self.wind = np.array([vx, vy, vz], dtype=np.float32)
+    #     # #     print(f"🌪️ Universal Wind: {active_strength:.2f} m/s @ {np.degrees(wind_angle):.1f}°")
+
+    #     # # self.target = self._sample_target()
+    #     # self.current_step = 0
+        
+    #     # # Returns the 26-element state (includes the wind the drone must now react to)
+    #     # return self.get_state()
+
+    #     # =========================================================
+    #     # WIND CURRICULUM (Matched to specific episode boundaries)
+    #     # =========================================================
+    #     ep = self.current_episode
+    #     self.enable_wind = True
+    #     active_strength = 0.0
+
+    #     if self.ACTIVE_PHASE == 1:
+    #         if ep <= 200: self.enable_wind = False
+    #         else: active_strength = random.uniform(0.3, 0.5)
+
+    #     elif self.ACTIVE_PHASE == 2:
+    #         if ep <= 280: active_strength = random.uniform(0.3, 0.5)
+    #         else: active_strength = random.uniform(0.5, 0.8)
+
+    #     elif self.ACTIVE_PHASE == 3:
+    #         if ep <= 200: active_strength = random.uniform(0.3, 0.5)
+    #         else: active_strength = random.uniform(0.5, 0.8)
+            
+    #     elif self.ACTIVE_PHASE == 4:
+    #         active_strength = random.uniform(0.5, 0.8)
+            
+    #     elif self.ACTIVE_PHASE == 5:
+    #         if ep <= 640: active_strength = random.uniform(0.5, 0.8)
+    #         else: active_strength = random.uniform(0.8, 1.0)
+            
+    #     # Apply the wind vectors if enabled
+    #     if self.enable_wind:
+    #         wind_angle = random.uniform(0, 2 * np.pi)
+    #         vx = active_strength * np.cos(wind_angle)
+    #         vy = active_strength * np.sin(wind_angle)
+
+    #         # Softer vertical gusts
+    #         z_force = active_strength * 0.12
+    #         vz = random.uniform(-z_force, z_force)
+
+    #         self.wind = np.array([vx, vy, vz], dtype=np.float32)
+    #         print(f"🌪️ Wind: {active_strength:.2f} m/s | Angle: {np.degrees(wind_angle):.1f}°")
+    #     else:
+    #         self.wind = np.zeros(3, dtype=np.float32)
+
+    #     # Reset action smoothing memory for the new episode
+    #     self._prev_action = np.zeros(4, dtype=np.float32)
+
+    #     self.current_step = 0
+        
+    #     # Returns the 26-element state (includes the wind the drone must now react to)
+    #     return self.get_state()
+    
+    #     # if self.current_episode <= 800:
+
+    #     #     self.enable_wind = False
+    #     #     self.wind_strength = 0.0
+    #     #     self.wind = np.zeros(3, dtype=np.float32)
+
+    #     # else:
+
+    #     #     self.enable_wind = True
+
+    #     #     wind_progress = min(1.0,(self.current_episode - 800) / 400.0)
+
+    #     #     # FINAL MAX = 1.0 m/s
+    #     #     self.wind_strength = 0.2 + (wind_progress * 0.8)
+
+    #     #     # FINAL MAX = 1.5 m/s
+    #     #     # self.wind_strength = 0.3 + (wind_progress * 1.2)
+
+    #     #     active_strength = random.uniform(0.2,self.wind_strength)
+
+    #     #     wind_angle = random.uniform(0, 2 * np.pi)
+
+    #     #     vx = active_strength * np.cos(wind_angle)
+    #     #     vy = active_strength * np.sin(wind_angle)
+
+    #     #     # softer vertical gusts
+    #     #     z_force = active_strength * 0.12
+    #     #     vz = random.uniform(-z_force, z_force)
+
+    #     #     self.wind = np.array([vx, vy, vz], dtype=np.float32)
+    #     #     print(
+    #     #         f"🌪️ Wind: {active_strength:.2f} m/s | "
+    #     #         f"Angle: {np.degrees(wind_angle):.1f}°"
+    #     #     )
+    #     # self.current_step = 0
+        
+    #     # # Returns the 26-element state (includes the wind the drone must now react to)
+    #     # return self.get_state()
+    
+    # # def _draw_target_marker(self):
+    # #     """Plot the navigation target in the AirSim world (persistent green marker + label)."""
+    # #     if not self.visualize_target:
+    # #         return
+    # #     try:
+    # #         self.client.simFlushPersistentMarkers()
+    # #         tx, ty, tz = float(self.target[0]), float(self.target[1]), float(self.target[2])
+    # #         goal = airsim.Vector3r(tx, ty, tz)
+    # #         self.client.simPlotPoints(
+    # #             [goal],
+    # #             color_rgba=[0.0, 1.0, 0.25, 1.0],
+    # #             size=35.0,
+    # #             duration=-1.0,
+    # #             is_persistent=True,
+    # #         )
+    # #         # Thin vertical segment through the goal for depth cue (NED: z increases downward).
+    # #         dz = 1.5
+    # #         line = [
+    # #             airsim.Vector3r(tx, ty, tz - dz),
+    # #             airsim.Vector3r(tx, ty, tz + dz),
+    # #         ]
+    # #         self.client.simPlotLineStrip(
+    # #             line,
+    # #             color_rgba=[0.0, 1.0, 0.25, 0.85],
+    # #             thickness=4.0,
+    # #             duration=-1.0,
+    # #             is_persistent=True,
+    # #         )
+    # #     except Exception as exc:
+    # #         print(f"(visualize_target) Could not draw marker: {exc}")
+
+    def _draw_target_marker(self):
+        """Plot the navigation target in the AirSim world as a visual circle (hitbox ring)."""
+        if not self.visualize_target:
+            return
+        try:
+            self.client.simFlushPersistentMarkers()
+            tx, ty, tz = float(self.target[0]), float(self.target[1]), float(self.target[2])
+            
+            # 1. Use the goal_threshold as the radius of our visual circle
+            radius = self.goal_threshold
+            points = []
+            num_segments = 32  # Higher number = smoother circle
+            
+            # 2. Calculate coordinates for a flat, horizontal circle using trig
+            for i in range(num_segments + 1):
+                angle = (i / num_segments) * 2 * np.pi
+                px = tx + radius * np.cos(angle)
+                py = ty + radius * np.sin(angle)
+                points.append(airsim.Vector3r(float(px), float(py), float(tz)))
+                
+            # 3. Draw the ring (The exact boundary the drone needs to cross to succeed)
+            self.client.simPlotLineStrip(
+                points,
+                color_rgba=[0.0, 1.0, 0.25, 1.0], # Bright Green
+                thickness=5.0,
+                duration=-1.0,
+                is_persistent=True,
+            )
+            
+            # 4. Optional: Keep a small dot right in the dead center so it's easy to spot from far away
+            center = airsim.Vector3r(tx, ty, tz)
+            self.client.simPlotPoints(
+                [center],
+                color_rgba=[0.0, 1.0, 0.25, 0.8],
+                size=10.0,
+                duration=-1.0,
+                is_persistent=True,
+            )
+
+        except Exception as exc:
+            print(f"(visualize_target) Could not draw marker: {exc}")
+
+    def _get_obstacle_distance(self):
+        """
+        Read all distance sensors and return (min_distance, sensor_dict).
+        sensor_dict maps sensor_name -> distance reading (or max_range if invalid/missing).
+        """
+        sensor_readings = {}
+        valid_readings = []
+        
+        for sensor_name in self.distance_sensor_names:
+            try:
+                distance_data = self.client.getDistanceSensorData(
+                    distance_sensor_name=sensor_name,
+                    vehicle_name=self.vehicle_name
+                )
+                dist = float(distance_data.distance)
+                if not np.isfinite(dist) or dist < 0.0:
+                    if not self._warned_distance_sensor_invalid:
+                        print(
+                            "⚠️ Distance sensor returned invalid reading; "
+                            f"using fallback {self.distance_sensor_max_range:.1f}m."
+                        )
+                        self._warned_distance_sensor_invalid = True
+                    sensor_readings[sensor_name] = self.distance_sensor_max_range
+                    continue
+                
+                clamped = min(dist, self.distance_sensor_max_range)
+                sensor_readings[sensor_name] = clamped
+                valid_readings.append(clamped)
+                
+            except Exception as exc:
+                # Usually means this sensor name is not configured on the vehicle.
+                if sensor_name not in self._warned_missing_distance_sensors:
+                    print(
+                        "⚠️ Distance sensor read failed "
+                        f"(name='{sensor_name}'): {exc}."
+                    )
+                    self._warned_missing_distance_sensors.add(sensor_name)
+                self._warned_distance_sensor_error = True
+                sensor_readings[sensor_name] = self.distance_sensor_max_range
+
+        min_distance = float(min(valid_readings)) if valid_readings else self.distance_sensor_max_range
+        return min_distance, sensor_readings
+
+    def _draw_sensor_rays(self, multirotor_state, sensor_readings):
+        """Draw color-coded rays for each distance sensor (forward/left/right/down)."""
+        if not self.visualize_sensor_ray:
+            return
+        if sensor_readings is None:
+            return
+        
+        try:
+            pos = multirotor_state.kinematics_estimated.position
+            orientation = multirotor_state.kinematics_estimated.orientation
+            roll, pitch, yaw = airsim.to_eularian_angles(orientation)
+            
+            drone_pos = np.array([pos.x_val, pos.y_val, pos.z_val], dtype=np.float32)
+            
+            # Sensor direction vectors in body frame (NED: X forward, Y right, Z down)
+            # Then rotate to world frame using yaw/pitch/roll
+            cos_y, sin_y = np.cos(yaw), np.sin(yaw)
+            cos_p, sin_p = np.cos(pitch), np.sin(pitch)
+            
+            # Rotation matrix: body -> world (simplified for small angles)
+            # Forward: body X-axis
+            forward_world = np.array([
+                cos_p * cos_y,
+                cos_p * sin_y,
+                sin_p
+            ], dtype=np.float32)
+
+            # Backward: body -X-axis
+            back_world = -forward_world
+            
+            # Right: body +Y-axis
+            right_world = np.array([
+                -sin_y,
+                cos_y,
+                0.0
+            ], dtype=np.float32)
+
+            # Left: body -Y-axis
+            left_world = -right_world
+            
+            # Down: body Z-axis
+            down_world = np.array([0.0, 0.0, 1.0], dtype=np.float32)
+            
+            # Map sensor names to their direction vectors and colors
+            sensor_directions = {
+                "Distance": (forward_world, [0.0, 1.0, 1.0, 0.9]),      # Cyan (front)
+                "DistanceBack": (back_world, [1.0, 0.0, 1.0, 0.9]),   # Magenta (Back) ✅ ADDED!
+                "DistanceLeft": (left_world, [1.0, 1.0, 0.0, 0.9]),     # Yellow (left)
+                "DistanceRight": (right_world, [1.0, 0.5, 0.0, 0.9]),   # Orange (right)
+                "DistanceDown": (down_world, [0.5, 0.0, 1.0, 0.9])      # Purple (down)
+            }
+            
+            for sensor_name, reading in sensor_readings.items():
+                if sensor_name not in sensor_directions:
+                    continue
+                
+                dist = float(reading)
+                # Skip if sensor returns max-range (no obstacle detected)
+                if dist >= (self.distance_sensor_max_range - 1e-3):
+                    continue
+                
+                direction, base_color = sensor_directions[sensor_name]
+                
+                # Red tint when very close, otherwise use base color
+                if dist < 2.0:
+                    color = [1.0, 0.1, 0.1, 0.95]  # Red
+                elif dist < 4.0:
+                    color = [1.0, 0.3, 0.0, 0.95]  # Orange-red
+                else:
+                    color = base_color
+                
+                # Draw ray from drone to obstacle point
+                end = drone_pos + (direction * dist)
+                
+                self.client.simPlotLineStrip(
+                    [
+                        airsim.Vector3r(float(drone_pos[0]), float(drone_pos[1]), float(drone_pos[2])),
+                        airsim.Vector3r(float(end[0]), float(end[1]), float(end[2])),
+                    ],
+                    color_rgba=color,
+                    thickness=2.5,
+                    duration=0.15,
+                    is_persistent=False,
+                )
+        
+        except Exception as exc:
+            # Non-fatal visualization path.
+            if self.current_step % 100 == 0:
+                print(f"(sensor_rays) Could not draw sensor rays: {exc}")
+        
+    def get_state(self):
+        state = self.client.getMultirotorState(vehicle_name=self.vehicle_name)
+        collision_info = self.client.simGetCollisionInfo(vehicle_name=self.vehicle_name)
+
+        pos = state.kinematics_estimated.position
+        vel = state.kinematics_estimated.linear_velocity
+        orientation = state.kinematics_estimated.orientation
+        angular_vel = state.kinematics_estimated.angular_velocity
+
+        # AirSim returns radians
+        roll, pitch, yaw = airsim.to_eularian_angles(orientation)
+
+        # --- HEADING ERROR CALCULATION ---
+        # 1. Angle from drone to target in world frame
+        dx = self.target[0] - pos.x_val
+        dy = self.target[1] - pos.y_val
+        target_angle = np.arctan2(dy, dx)
+        
+        # 2. Difference between target angle and drone's current yaw
+        heading_error = target_angle - yaw
+        
+        # 3. Smooth representation using trig
+        
+        # heading_obs = np.array([np.cos(heading_error), np.sin(heading_error)], dtype=np.float32)
+        
+        # holonomic control 
+        heading_obs = np.array([
+            dx / (np.linalg.norm([dx, dy]) + 1e-6),
+            dy / (np.linalg.norm([dx, dy]) + 1e-6)
+        ], dtype=np.float32)
+        # ----------------------------------
+
+        position = np.array([
+            pos.x_val,
+            pos.y_val,
+            pos.z_val
+        ], dtype=np.float32)
+
+        linear_velocity = np.array([
+            vel.x_val,
+            vel.y_val,
+            vel.z_val
+        ], dtype=np.float32)
+
+        orientation_values = np.array([
+            roll,
+            pitch,
+            yaw
+        ], dtype=np.float32)
+
+        angular_velocity = np.array([
+            angular_vel.x_val,
+            angular_vel.y_val,
+            angular_vel.z_val
+        ], dtype=np.float32)
+
+        goal_delta = (self.target - position).astype(np.float32)
+
+        obstacle_dist, sensor_readings = self._get_obstacle_distance()
+        self._draw_sensor_rays(state, sensor_readings)
+        
+        # Cache for step() to avoid duplicate sensor call
+        self._cached_obstacle_dist = obstacle_dist
+        self._cached_sensor_readings = sensor_readings
+        
+        sensor_values = np.array([
+            sensor_readings.get("Distance", 20.0),
+            sensor_readings.get("DistanceLeft", 20.0),
+            sensor_readings.get("DistanceRight", 20.0),
+            sensor_readings.get("DistanceBack", 20.0),
+            sensor_readings.get("DistanceDown", 20.0)
+        ], dtype=np.float32)
+
+        collision = np.array([
+            1.0 if collision_info.has_collided else 0.0
+        ], dtype=np.float32)
+
+        wind_state = self.wind.astype(np.float32)
+
+        return np.concatenate([
+            position,           # 3
+            linear_velocity,    # 3
+            orientation_values, # 3
+            angular_velocity,   # 3
+            sensor_values,      # 5 (Changed from 1 to 5)
+            goal_delta,         # 3
+            wind_state,         # 3
+            collision,          # 1
+            heading_obs         # 2
+        ])                      # Total: 26 elements
+
+    def get_position(self):
+        """
+        Return current drone position as numpy array.
+        """
+
+        state = self.client.getMultirotorState(vehicle_name=self.vehicle_name)
+        pos = state.kinematics_estimated.position
+
+        return np.array([
+            pos.x_val,
+            pos.y_val,
+            pos.z_val
+        ])
+
+    def get_distance_to_target(self):
+        """
+        Return Euclidean distance between drone and target.
+        """
+
+        position = self.get_position()
+        return np.linalg.norm(position - self.target)
+
+    def is_out_of_bounds(self):
+            pos = self.get_position()
+            x, y, z = pos[0], pos[1], pos[2]
+
+            if x < self.x_min or x > self.x_max:
+                return True
+            if y < self.y_min or y > self.y_max:
+                return True
+            if z < self.z_min or z > self.z_max:
+                return True
+            return False
+
+    def has_collision(self):
+        """
+        Check AirSim collision flag.
+        """
+
+        collision_info = self.client.simGetCollisionInfo(vehicle_name=self.vehicle_name)
+        return collision_info.has_collided
+
+    # def step(self, action):
+
+    #     self.current_step += 1
+
+    #     action = clip_action(action)
+    #     action = action.astype(np.float32, copy=False)
+
+
+    #     # ============================================================
+    #     # 🛡️ STABILITY ASSIST SYSTEM (Anti-Shaking Flight Controller)
+    #     # ============================================================
+
+    #     # Raw PPO actions
+    #     vx = float(action[0])
+    #     vy = float(action[1])
+    #     vz = float(action[2])
+    #     yaw_rate = float(action[3])
+
+    #     # Get current drone telemetry
+    #     state = self.client.getMultirotorState(vehicle_name=self.vehicle_name)
+
+    #     linear_vel = state.kinematics_estimated.linear_velocity
+    #     angular_vel = state.kinematics_estimated.angular_velocity
+    #     orientation = state.kinematics_estimated.orientation
+
+    #     roll, pitch, yaw = airsim.to_eularian_angles(orientation)
+
+    #     # Current physical motion
+    #     current_speed = np.linalg.norm([
+    #         linear_vel.x_val,
+    #         linear_vel.y_val,
+    #         linear_vel.z_val
+    #     ])
+
+    #     rotation_speed = np.linalg.norm([
+    #         angular_vel.x_val,
+    #         angular_vel.y_val,
+    #         angular_vel.z_val
+    #     ])
+
+    #     # ============================================================
+    #     # 1. DEAD-ZONE FILTER
+    #     # Ignore tiny unstable PPO corrections
+    #     # ============================================================
+
+    #     if abs(vx) < 0.15:
+    #         vx = 0.0
+
+    #     if abs(vy) < 0.15:
+    #         vy = 0.0
+
+    #     if abs(vz) < 0.12:
+    #         vz = 0.0
+
+    #     # yaw deadzone too large
+    #     # if abs(yaw_rate) < 3.0:
+    #         # yaw_rate = 0.0
+
+    #     if abs(yaw_rate) < 1.0:
+    #         yaw_rate = 0.0
+
+    #     # ============================================================
+    #     # 2. HOVER STABILIZER
+    #     # If drone is already stable, reduce movement strength
+    #     # ============================================================
+    #     current_pos = state.kinematics_estimated.position
+        
+    #     # Only stabilize after takeoff altitude reached
+    #     if current_pos.z_val < -3.0:
+
+    #         # Reduce side wobbling
+    #         if current_speed < 1.5:
+    #             vx *= 0.75
+    #             # vy *= 0.55
+    #             vy *= 0.80
+    #             vz *= 0.45
+
+    #         # Reduce spinning oscillation
+    #         if rotation_speed > 0.4:
+    #             yaw_rate *= 0.5
+
+    #     # ============================================================
+    #     # 3. TILT PROTECTION
+    #     # Prevent aggressive leaning
+    #     # ============================================================
+
+    #     max_tilt = 0.35  # radians (~20 degrees)
+
+    #     # # heading-following drone
+    #     # if abs(roll) > max_tilt:
+    #     #     vy *= 0.4
+
+    #     # if abs(pitch) > max_tilt:
+    #     #     vx *= 0.4
+
+    #     # holonomic vector-navigation drone
+    #     tilt_penalty = 1.0 - min(abs(roll), 0.6) / 0.6
+    #     vy *= tilt_penalty
+
+    #     tilt_penalty = 1.0 - min(abs(pitch), 0.6) / 0.6
+    #     vx *= tilt_penalty
+    #     # ============================================================
+    #     # 4. ACTION SMOOTHING (VERY IMPORTANT)
+    #     # Smooth sudden PPO action jumps
+    #     # ============================================================
+
+    #     # Initialize memory if first step
+    #     if not hasattr(self, "_prev_action"):
+    #         self._prev_action = np.zeros(4, dtype=np.float32)
+
+    #     current_action = np.array([vx, vy, vz, yaw_rate], dtype=np.float32)
+
+    #     # Smoothing factor
+    #     # alpha = 0.82
+    #     alpha = 0.65
+
+    #     smoothed_action = (
+    #         alpha * self._prev_action
+    #         + (1.0 - alpha) * current_action
+    #     )
+
+    #     self._prev_action = smoothed_action.copy()
+
+    #     vx, vy, vz, yaw_rate = smoothed_action
+
+    #     # ============================================================
+    #     # 5. FINAL SAFETY CLAMPS
+    #     # ============================================================
+
+        
+    #     # vx = float(np.clip(vx, -2.5, 2.5))
+    #     # vy = float(np.clip(vy, -2.0, 2.0))
+        
+    #     # holonomic control
+    #     vx = float(np.clip(vx, -2.2, 2.2))
+    #     vy = float(np.clip(vy, -2.2, 2.2))
+        
+    #     vz = float(np.clip(vz, -1.5, 1.5))
+    #     yaw_rate = float(np.clip(yaw_rate, -25.0, 25.0))
+
+    #     # vx = float(action[0])
+    #     # vy = float(action[1])
+    #     # vz = float(action[2])
+    #     # yaw_rate = float(action[3])
+
+    #     # # ======================================================================
+    #     # # 🧭 DIRECT COMPASS MATH ASSIST (Forces Nose-to-Target Turning)
+    #     # # ======================================================================
+    #     # # 1. Grab fresh telemetry from the autopilot right before commanding flight
+    #     # state = self.client.getMultirotorState(vehicle_name=self.vehicle_name)
+    #     # pos = state.kinematics_estimated.position
+    #     # orientation = state.kinematics_estimated.orientation
+    #     # _, _, yaw = airsim.to_eularian_angles(orientation)
+
+    #     # # 2. Direct coordinate delta and angle calculations
+    #     # dx = self.target[0] - pos.x_val
+    #     # dy = self.target[1] - pos.y_val
+    #     # target_angle = np.arctan2(dy, dx)
+    #     # heading_error = target_angle - yaw
+
+    #     # # 3. Calculate trigonometric lookup scalars
+    #     # cos_err = float(np.cos(heading_error))
+    #     # sin_err = float(np.sin(heading_error))
+
+    #     # # 4. If the drone's face is not aligned within a clean look-window
+    #     # if cos_err < 0.94:
+    #     #     # sin_err > 0 means target is to the right -> Turn Right (+30 deg/s)
+    #     #     # sin_err < 0 means target is to the left  -> Turn Left (-30 deg/s)
+    #     #     assist_yaw = np.sign(sin_err) * 30.0  
+            
+    #     #     # Blend 60% AI exploration output with 40% target tracking guidance
+    #     #     yaw_rate = (yaw_rate * 0.6) + (assist_yaw * 0.4)
+            
+    #     #     # Anti-Escape Rule: If tail is completely turned, freeze forward throttle
+    #     #     if cos_err < 0.0:
+    #     #         vx = min(vx, 0.2) 
+    #     # # ======================================================================
+
+    #     # Physically push the drone using the AirSim API
+    #     if self.enable_wind:
+    #         self.client.simSetWind(airsim.Vector3r(*self.wind.tolist()))
+
+    #     # Move drone using world-frame velocity command
+    #     # self.client.moveByVelocityBodyFrameAsync(
+    #     #     vx,
+    #     #     vy,
+    #     #     vz,
+    #     #     duration=self.step_duration,
+    #     #     yaw_mode=airsim.YawMode(is_rate=True, yaw_or_rate=yaw_rate),
+    #     #     vehicle_name=self.vehicle_name,
+    #     # ).join()
+
+    #     # Move drone using true WORLD-FRAME velocity command (Holonomic)
+    #     self.client.moveByVelocityAsync(
+    #         vx,
+    #         vy,
+    #         vz,
+    #         duration=self.step_duration,
+    #         yaw_mode=airsim.YawMode(is_rate=True, yaw_or_rate=yaw_rate),
+    #         vehicle_name=self.vehicle_name,
+    #     ).join()
+
+    #     # Gather Sensor Data
+    #     multirotor_state = self.client.getMultirotorState(vehicle_name=self.vehicle_name)
+    #     pos = multirotor_state.kinematics_estimated.position  
+    #     vel = multirotor_state.kinematics_estimated.linear_velocity
+    #     angular_velocity = multirotor_state.kinematics_estimated.angular_velocity
+    #     ang_vel_np = np.array([
+    #         angular_velocity.x_val, 
+    #         angular_velocity.y_val, 
+    #         angular_velocity.z_val
+    #     ])
+
+    #     # min_obstacle_dist, 
+    #     _, sensor_dict = self._get_obstacle_distance()
+
+    #     next_state = self.get_state()
+    #     extracted_heading = next_state[-2:]
+    #     distance = self.get_distance_to_target()
+    #     collision = self.has_collision()
+    #     out_of_bounds = self.is_out_of_bounds()
+        
+    #     # Use cached obstacle distance from get_state() to avoid duplicate sensor call
+    #     # Use cached obstacle distance from get_state() to avoid duplicate sensor call
+    #     obstacle_dist = self._cached_obstacle_dist
+
+    #     # Prints every 50 steps to reduce I/O overhead.
+    #     if self.current_step % 50 == 0:
+    #         print(f"Step: {self.current_step:3} | Dist: {distance:5.2f}m | Obs: {obstacle_dist:5.2f}m")
+        
+    #     # =========================================================
+    #     # 🗺️ MAP CONTEXT DETECTORS (For Phase 9+ Rewards)
+    #     # =========================================================
+    #     in_intersection = False
+    #     dyn_obs_ahead = False
+        
+    #     # Check if inside an intersection (Where horizontal and vertical roads cross)
+    #     if "T3_Wind" in self.current_map:
+    #         # Map 3 main intersections (approximate turning zones)
+    #         int_1 = (110.0 <= pos.x_val <= 130.0) and (-65.0 <= pos.y_val <= -45.0)
+    #         int_2 = (110.0 <= pos.x_val <= 130.0) and (45.0 <= pos.y_val <= 65.0)
+    #         int_3 = (60.0 <= pos.x_val <= 80.0) and (-65.0 <= pos.y_val <= -45.0)
+    #         int_4 = (60.0 <= pos.x_val <= 80.0) and (45.0 <= pos.y_val <= 65.0)
+            
+    #         if int_1 or int_2 or int_3 or int_4:
+    #             in_intersection = True
+                
+    #         # Check if approaching a dynamic obstacle (Map 3 specific coordinates)
+    #         # Front sensor < 10m and looking at a known obstacle boundary
+    #         if obstacle_dist < 10.0:
+    #             obs1 = (16.0 <= pos.x_val <= 60.0) and (-6.0 <= pos.y_val <= 6.0) # Middle road obstacles
+    #             obs2 = (115.0 <= pos.x_val <= 125.0) and (-20.0 <= pos.y_val <= 20.0) # Back road obstacles
+    #             if obs1 or obs2:
+    #                 dyn_obs_ahead = True
+
+    #     elif "T2_MediumCityBlocks" in self.current_map:
+    #         # Map 2 intersection (The crossroad)
+    #         if (-5.0 <= pos.x_val <= 25.0) and (-15.0 <= pos.y_val <= 15.0):
+    #             in_intersection = True
+    #         if obstacle_dist < 10.0 and (10.0 <= pos.x_val <= 65.0) and (-6.0 <= pos.y_val <= 6.0):
+    #             dyn_obs_ahead = True
+
+    #     done = False
+
+    #     # Calculate Done State (Logic only)
+    #     # Success condition
+    #     if distance < self.goal_threshold:
+    #         done = True
+    #         print("Target reached!")
+    #     # Collision condition
+    #     elif collision:
+    #         done = True
+    #         print("Collision!")
+    #     # Boundary condition
+    #     elif out_of_bounds:
+    #         done = True
+    #         print("Out of bounds!")
+    #     # Max step condition
+    #     elif self.current_step >= self.max_steps:
+    #         done = True
+    #         print("Max steps reached!")
+        
+    #     if done:
+    #         self.client.hoverAsync(vehicle_name=self.vehicle_name).join()
+
+    #     # Prepare Metadata
+    #     # info = {
+    #     #     "success": distance < self.goal_threshold,
+    #     #     "collision": collision,
+    #     #     "out_of_bounds": out_of_bounds,
+    #     #     "action_magnitude": float(np.linalg.norm([vx, vy, vz, yaw_rate])),
+    #     #     "prev_distance": self.previous_distance,
+    #     #     "curr_distance": distance,
+    #     #     "stability": float(np.linalg.norm(ang_vel_np)),
+    #     #     "obstacle_distance": obstacle_dist,
+    #     #     "heading_obs": extracted_heading.tolist(),
+    #     #     "Distance": sensor_dict.get("Distance", 20.0),
+    #     #     "DistanceLeft": sensor_dict.get("DistanceLeft", 20.0),
+    #     #     "DistanceRight": sensor_dict.get("DistanceRight", 20.0),
+    #     #     "DistanceBack": sensor_dict.get("DistanceBack", 20.0),
+    #     #     "DistanceDown": sensor_dict.get("DistanceDown", 20.0),
+    #     #     "velocity": [vel.x_val, vel.y_val, vel.z_val],
+    #     #     "goal_delta": (self.target - np.array([pos.x_val, pos.y_val, pos.z_val])).tolist(),
+    #     #     "pos_x": pos.x_val,
+    #     #     "pos_y": pos.y_val,
+    #     #     "pos_z": pos.z_val,
+    #     #     "safety_bubble": getattr(self, "safety_distance", 5.0),
+    #     #     "wind_vector": self.wind.tolist() if self.enable_wind else [0.0, 0.0, 0.0]
+    #     # }
+    #     info = {
+    #         "success": distance < self.goal_threshold,
+    #         "collision": collision,
+    #         "out_of_bounds": out_of_bounds,
+    #         "action_magnitude": float(np.linalg.norm([vx, vy, vz, yaw_rate])),
+    #         "prev_distance": self.previous_distance,
+    #         "curr_distance": distance,
+    #         "stability": float(np.linalg.norm(ang_vel_np)),
+    #         "obstacle_distance": obstacle_dist,
+    #         "heading_obs": extracted_heading.tolist(),
+    #         "Distance": sensor_dict.get("Distance", 20.0),
+    #         "DistanceLeft": sensor_dict.get("DistanceLeft", 20.0),
+    #         "DistanceRight": sensor_dict.get("DistanceRight", 20.0),
+    #         "DistanceBack": sensor_dict.get("DistanceBack", 20.0),
+    #         "DistanceDown": sensor_dict.get("DistanceDown", 20.0),
+    #         "velocity": [vel.x_val, vel.y_val, vel.z_val],
+    #         "goal_delta": (self.target - np.array([pos.x_val, pos.y_val, pos.z_val])).tolist(),
+    #         "pos_x": pos.x_val,
+    #         "pos_y": pos.y_val,
+    #         "pos_z": pos.z_val,
+    #         "safety_bubble": getattr(self, "safety_distance", 5.0),
+    #         "wind_vector": self.wind.tolist() if self.enable_wind else [0.0, 0.0, 0.0],
+    #         "active_phase": self.ACTIVE_PHASE,
+    #         "inside_intersection": in_intersection,
+    #         "dynamic_obs_ahead": dyn_obs_ahead
+    #     }
+
+    #     self.previous_distance = distance
+
+    #     return next_state, 0.0, done, info
+
+    def step(self, action):
+        self.current_step += 1
+
+        # Calculate action jitter delta before clipping
+        action_change = float(np.linalg.norm(action - self._prev_raw_action))
+        self._prev_raw_action = action.copy()
+
+        action = clip_action(action)
+        action = action.astype(np.float32, copy=False)
+
+        # ============================================================
+        # 🛡️ STABILITY ASSIST SYSTEM
+        # ============================================================
+        vx, vy, vz, yaw_rate = float(action[0]), float(action[1]), float(action[2]), float(action[3])
+        state = self.client.getMultirotorState(vehicle_name=self.vehicle_name)
+        linear_vel = state.kinematics_estimated.linear_velocity
+        angular_vel = state.kinematics_estimated.angular_velocity
+        orientation = state.kinematics_estimated.orientation
+        roll, pitch, yaw = airsim.to_eularian_angles(orientation)
+
+        current_speed = np.linalg.norm([linear_vel.x_val, linear_vel.y_val, linear_vel.z_val])
+        rotation_speed = np.linalg.norm([angular_vel.x_val, angular_vel.y_val, angular_vel.z_val])
+
+        # Deadzone filter
+        if abs(vx) < 0.15: vx = 0.0
+        if abs(vy) < 0.15: vy = 0.0
+        if abs(vz) < 0.12: vz = 0.0
+        if abs(yaw_rate) < 1.0: yaw_rate = 0.0
+
+        # Hover Stabilizer
+        current_pos = state.kinematics_estimated.position
+        if current_pos.z_val < -3.0:
+            if current_speed < 1.5:
+                vx *= 0.75
+                vy *= 0.80
+                vz *= 0.45
+            if rotation_speed > 0.4:
+                yaw_rate *= 0.5
+
+        # Tilt limits
+        tilt_penalty_y = 1.0 - min(abs(roll), 0.6) / 0.6
+        vy *= tilt_penalty_y
+        tilt_penalty_x = 1.0 - min(abs(pitch), 0.6) / 0.6
+        vx *= tilt_penalty_x
+
+        # Action Smoothing
+        if not hasattr(self, "_prev_action"):
+            self._prev_action = np.zeros(4, dtype=np.float32)
+        current_action = np.array([vx, vy, vz, yaw_rate], dtype=np.float32)
+        alpha = 0.65
+        smoothed_action = alpha * self._prev_action + (1.0 - alpha) * current_action
+        self._prev_action = smoothed_action.copy()
+
+        vx, vy, vz, yaw_rate = smoothed_action
+        vx = float(np.clip(vx, -2.2, 2.2))
+        vy = float(np.clip(vy, -2.2, 2.2))
+        vz = float(np.clip(vz, -1.5, 1.5))
+        yaw_rate = float(np.clip(yaw_rate, -25.0, 25.0))
+
+        if self.enable_wind:
+            self.client.simSetWind(airsim.Vector3r(*self.wind.tolist()))
+
+        self.client.moveByVelocityAsync(
+            vx, vy, vz, duration=self.step_duration,
+            yaw_mode=airsim.YawMode(is_rate=True, yaw_or_rate=yaw_rate),
+            vehicle_name=self.vehicle_name,
+        ).join()
+
+        # Telemetry updates
+        multirotor_state = self.client.getMultirotorState(vehicle_name=self.vehicle_name)
+        pos = multirotor_state.kinematics_estimated.position  
+        vel = multirotor_state.kinematics_estimated.linear_velocity
+        angular_velocity = multirotor_state.kinematics_estimated.angular_velocity
+        ang_vel_np = np.array([angular_velocity.x_val, angular_velocity.y_val, angular_velocity.z_val])
+
+        _, sensor_dict = self._get_obstacle_distance()
+        next_state = self.get_state()
+        extracted_heading = next_state[-2:]
+        distance = self.get_distance_to_target()
+        collision = self.has_collision()
+        out_of_bounds = self.is_out_of_bounds()
+        obstacle_dist = self._cached_obstacle_dist
+
+        if self.current_step % 50 == 0:
+            print(f"Step: {self.current_step:3} | Dist: {distance:5.2f}m | Obs: {obstacle_dist:5.2f}m")
+        
+        # =========================================================
+        # 🗺️ MAP CONTEXT DETECTORS (For Phase 9+ Turning Windows)
+        # =========================================================
+        in_intersection = False
+        dyn_obs_ahead = False
+        
+        if "T3_Wind" in self.current_map:
+            int_1 = (110.0 <= pos.x_val <= 130.0) and (-65.0 <= pos.y_val <= -45.0)
+            int_2 = (110.0 <= pos.x_val <= 130.0) and (45.0 <= pos.y_val <= 65.0)
+            int_3 = (60.0 <= pos.x_val <= 80.0) and (-65.0 <= pos.y_val <= -45.0)
+            int_4 = (60.0 <= pos.x_val <= 80.0) and (45.0 <= pos.y_val <= 65.0)
+            if int_1 or int_2 or int_3 or int_4:
+                in_intersection = True
+                
+            if obstacle_dist < 10.0:
+                obs1 = (16.0 <= pos.x_val <= 60.0) and (-6.0 <= pos.y_val <= 6.0)
+                obs2 = (115.0 <= pos.x_val <= 125.0) and (-20.0 <= pos.y_val <= 20.0)
+                if obs1 or obs2:
+                    dyn_obs_ahead = True
+
+        elif "T2_MediumCityBlocks" in self.current_map:
+            if (-5.0 <= pos.x_val <= 25.0) and (-15.0 <= pos.y_val <= 15.0):
+                in_intersection = True
+            if obstacle_dist < 10.0 and (10.0 <= pos.x_val <= 65.0) and (-6.0 <= pos.y_val <= 6.0):
+                dyn_obs_ahead = True
+
+        just_entered = in_intersection and not self.prev_in_intersection
+        self.prev_in_intersection = in_intersection
+        done = False
+
+        # Anti-Hover Timeout (Solves 5x training deceleration bug)
+        if current_speed < 0.4 and distance > 3.5:
+            self.hover_counter += 1
+        else:
+            self.hover_counter = 0
+
+        if self.hover_counter > 100:  # ~15 seconds of immobility = terminate
+            done = True
+            print("Hover timeout triggered! Agent cleared to prevent step starvation.")
+
+        if distance < self.goal_threshold:
+            done = True
+            print("Target reached!")
+        elif collision:
+            done = True
+            print("Collision!")
+        elif out_of_bounds:
+            done = True
+            print("Out of bounds!")
+        elif self.current_step >= self.max_steps:
+            done = True
+            print("Max steps reached!")
+        
+        # if done:
+        #     self.client.hoverAsync(vehicle_name=self.vehicle_name).join()
+        #     # Cache positions for next path step if arriving safely
+        #     if distance < self.goal_threshold:
+        #         self.continuous_start_x = self.target[0]
+        #         self.continuous_start_y = self.target[1]
+        #     else:
+        #         self.continuous_start_x = 70.0
+        #         self.continuous_start_y = 0.0
+        if done:
+            self.client.hoverAsync(vehicle_name=self.vehicle_name).join()
+            # Cache positions for next path step if arriving safely
+            if distance < self.goal_threshold:
+                # 🚀 FIX: Wrap inside float() to convert from NumPy to native Python floats
+                self.continuous_start_x = float(self.target[0])
+                self.continuous_start_y = float(self.target[1])
+            else:
+                self.continuous_start_x = 70.0
+                self.continuous_start_y = 0.0
+
+        info = {
+            "success": distance < self.goal_threshold,
+            "collision": collision,
+            "out_of_bounds": out_of_bounds,
+            "action_magnitude": float(np.linalg.norm([vx, vy, vz, yaw_rate])),
+            "action_change": action_change,
+            "prev_distance": self.previous_distance,
+            "curr_distance": distance,
+            "stability": float(np.linalg.norm(ang_vel_np)),
+            "obstacle_distance": obstacle_dist,
+            "heading_obs": extracted_heading.tolist(),
+            "Distance": sensor_dict.get("Distance", 20.0),
+            "DistanceLeft": sensor_dict.get("DistanceLeft", 20.0),
+            "DistanceRight": sensor_dict.get("DistanceRight", 20.0),
+            "DistanceBack": sensor_dict.get("DistanceBack", 20.0),
+            "DistanceDown": sensor_dict.get("DistanceDown", 20.0),
+            "velocity": [vel.x_val, vel.y_val, vel.z_val],
+            "goal_delta": (self.target - np.array([pos.x_val, pos.y_val, pos.z_val])).tolist(),
+            "pos_x": pos.x_val,
+            "pos_y": pos.y_val,
+            "pos_z": pos.z_val,
+            "pitch": pitch,
+            "roll": roll,
+            "yaw": yaw,
+            "safety_bubble": getattr(self, "safety_distance", 5.0),
+            "wind_vector": self.wind.tolist() if self.enable_wind else [0.0, 0.0, 0.0],
+            "active_phase": self.ACTIVE_PHASE,
+            "inside_intersection": in_intersection,
+            "just_entered_intersection": just_entered,
+            "dynamic_obs_ahead": dyn_obs_ahead
+        }
+
+        self.previous_distance = distance
+        return next_state, 0.0, done, info
+
+    def switch_map(self, map_name, force=False):
+        if not force and self.current_map == map_name:
+            print(f"✔️ Already on {map_name}. No restart needed.")
+            return True
+
+        print(f"\n--- 🛑 RELAY: Closing current EXE and starting {map_name} ---")
+        
+        # 1. Kill the current instance
+        # The /T flag ensures all child processes of the EXE are also killed
+        os.system("taskkill /F /IM Blocks.exe /T >nul 2>&1")
+        time.sleep(8) 
+
+        # 2. Get the specific path for the map
+        exe_path = self.EXE_PATHS.get(map_name)
+        
+        # 3. Launch the new EXE
+        # creationflags=subprocess.CREATE_NEW_CONSOLE keeps the simulator 
+        # output in its own window so it doesn't clutter your training logs
+        subprocess.Popen([exe_path], creationflags=subprocess.CREATE_NEW_CONSOLE)
+        time.sleep(5)
+
+        # 4. Connect and Sync
+        for attempt in range(1, 31):
+            try:
+                self.client = airsim.MultirotorClient(self.airsim_ip, self.rpc_port)
+                self.client.confirmConnection()
+                self.client.enableApiControl(True)
+                self.client.armDisarm(True)
+                
+                self.current_map = map_name
+                self._set_boundary_limits()
+                print(f"--- ✅ Ready on {map_name} (Episode continues...) ---")
+                return True
+            except Exception:
+                time.sleep(5)
+        return False
+    

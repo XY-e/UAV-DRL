@@ -1,0 +1,23 @@
+# Python 3.10.x recommended (AirSim client and older wheels).
+# Install 3.10 from https://www.python.org/downloads/ then (PowerShell, in this folder):
+#   py -3.10 -m venv .venv
+#   .\.venv\Scripts\pip install --upgrade pip
+#   .\.venv\Scripts\pip install numpy torch tensorboard msgpack-rpc-python
+#   .\.venv\Scripts\pip install airsim --no-build-isolation
+# GPU (NVIDIA): plain "torch" from PyPI is CPU-only. After deps are installed, run e.g.:
+#   py -3.10 -m pip uninstall torch -y
+#   py -3.10 -m pip install torch --index-url https://download.pytorch.org/whl/cu128
+# Pick cu118 / cu126 / cu128 from https://pytorch.org/get-started/locally/ for your driver.
+
+# --- Algorithm (Cho Xin Yue) ---
+torch
+numpy
+
+# --- Training (Tan Sie Yao) ---
+torch
+tensorboard
+numpy
+
+# --- Environment (Woo Xuan Zhi) ---
+airsim
+msgpack-rpc-python

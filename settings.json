@@ -1,0 +1,38 @@
+{
+    "SeeDocsAt": "https://github.com/Microsoft/AirSim/blob/main/docs/settings.md",
+    "SettingsVersion": 1.2,
+    "SimMode": "Multirotor",
+    "ClockSpeed": 3.0,
+    "Vehicles": {
+      "Drone1": {
+        "VehicleType": "SimpleFlight",
+        "Sensors": {
+          "Distance": {
+            "SensorType": 5,
+            "Enabled": true,
+            "X": 0, "Y": 0, "Z": 0,
+            "Roll": 0, "Pitch": 0, "Yaw": 0
+          },
+          "DistanceLeft": {
+            "SensorType": 5,
+            "Enabled": true,
+            "X": 0, "Y": 0, "Z": 0,
+            "Roll": 0, "Pitch": 0, "Yaw": -90
+          },
+          "DistanceRight": {
+            "SensorType": 5,
+            "Enabled": true,
+            "X": 0, "Y": 0, "Z": 0,
+            "Roll": 0, "Pitch": 0, "Yaw": 90
+          },
+          "DistanceDown": {
+            "SensorType": 5,
+            "Enabled": true,
+            "X": 0, "Y": 0, "Z": 0,
+            "Roll": 0, "Pitch": 90, "Yaw": 0
+          }
+        }
+      }
+    }
+  }
+  
