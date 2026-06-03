@@ -1,0 +1,25 @@
+{
+  "type": "checkpoint.manifest",
+  "run_id": "RUN-20260602-1930",
+  "model_version": "ppo_v1",
+  "checkpoints": [
+    {
+      "episode": 40,
+      "checkpoint_path": "models/RUN-20260602-1930_ppo_v1_ep40.pt",
+      "reward_mean": 32.55,
+      "success_rate": 0.6
+    },
+    {
+      "episode": 80,
+      "checkpoint_path": "models/RUN-20260602-1930_ppo_v1_ep80.pt",
+      "reward_mean": 225.47,
+      "success_rate": 1.0
+    },
+    {
+      "episode": 120,
+      "checkpoint_path": "models/RUN-20260602-1930_ppo_v1_ep120.pt",
+      "reward_mean": 377.13,
+      "success_rate": 1.0
+    }
+  ]
+}

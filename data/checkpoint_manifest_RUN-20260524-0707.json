@@ -1,0 +1,91 @@
+{
+  "type": "checkpoint.manifest",
+  "run_id": "RUN-20260524-0707",
+  "model_version": "ppo_v1",
+  "checkpoints": [
+    {
+      "episode": 40,
+      "checkpoint_path": "models/RUN-20260524-0707_ppo_v1_ep40.pt",
+      "reward_mean": 377.19,
+      "success_rate": 0.875
+    },
+    {
+      "episode": 80,
+      "checkpoint_path": "models/RUN-20260524-0707_ppo_v1_ep80.pt",
+      "reward_mean": 405.06,
+      "success_rate": 0.9
+    },
+    {
+      "episode": 120,
+      "checkpoint_path": "models/RUN-20260524-0707_ppo_v1_ep120.pt",
+      "reward_mean": 395.04,
+      "success_rate": 0.925
+    },
+    {
+      "episode": 160,
+      "checkpoint_path": "models/RUN-20260524-0707_ppo_v1_ep160.pt",
+      "reward_mean": 276.51,
+      "success_rate": 0.775
+    },
+    {
+      "episode": 200,
+      "checkpoint_path": "models/RUN-20260524-0707_ppo_v1_ep200.pt",
+      "reward_mean": 339.89,
+      "success_rate": 0.875
+    },
+    {
+      "episode": 240,
+      "checkpoint_path": "models/RUN-20260524-0707_ppo_v1_ep240.pt",
+      "reward_mean": 369.5,
+      "success_rate": 0.9
+    },
+    {
+      "episode": 280,
+      "checkpoint_path": "models/RUN-20260524-0707_ppo_v1_ep280.pt",
+      "reward_mean": 324.06,
+      "success_rate": 0.825
+    },
+    {
+      "episode": 320,
+      "checkpoint_path": "models/RUN-20260524-0707_ppo_v1_ep320.pt",
+      "reward_mean": 266.06,
+      "success_rate": 0.725
+    },
+    {
+      "episode": 360,
+      "checkpoint_path": "models/RUN-20260524-0707_ppo_v1_ep360.pt",
+      "reward_mean": 203.88,
+      "success_rate": 0.675
+    },
+    {
+      "episode": 400,
+      "checkpoint_path": "models/RUN-20260524-0707_ppo_v1_ep400.pt",
+      "reward_mean": 196.22,
+      "success_rate": 0.625
+    },
+    {
+      "episode": 440,
+      "checkpoint_path": "models/RUN-20260524-0707_ppo_v1_ep440.pt",
+      "reward_mean": 290.35,
+      "success_rate": 0.8
+    },
+    {
+      "episode": 480,
+      "checkpoint_path": "models/RUN-20260524-0707_ppo_v1_ep480.pt",
+      "reward_mean": 248.11,
+      "success_rate": 0.675
+    },
+    {
+      "episode": 520,
+      "checkpoint_path": "models/RUN-20260524-0707_ppo_v1_ep520.pt",
+      "reward_mean": 284.82,
+      "success_rate": 0.725
+    },
+    {
+      "episode": 560,
+      "checkpoint_path": "models/RUN-20260524-0707_ppo_v1_ep560.pt",
+      "reward_mean": 275.15,
+      "success_rate": 0.675
+    }
+  ]
+}

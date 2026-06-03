@@ -1,0 +1,49 @@
+{
+  "type": "checkpoint.manifest",
+  "run_id": "RUN-20260525-0609",
+  "model_version": "ppo_v1",
+  "checkpoints": [
+    {
+      "episode": 40,
+      "checkpoint_path": "models/RUN-20260525-0609_ppo_v1_ep40.pt",
+      "reward_mean": 412.79,
+      "success_rate": 0.625
+    },
+    {
+      "episode": 80,
+      "checkpoint_path": "models/RUN-20260525-0609_ppo_v1_ep80.pt",
+      "reward_mean": 446.94,
+      "success_rate": 0.6
+    },
+    {
+      "episode": 120,
+      "checkpoint_path": "models/RUN-20260525-0609_ppo_v1_ep120.pt",
+      "reward_mean": 399.86,
+      "success_rate": 0.65
+    },
+    {
+      "episode": 160,
+      "checkpoint_path": "models/RUN-20260525-0609_ppo_v1_ep160.pt",
+      "reward_mean": 468.08,
+      "success_rate": 0.65
+    },
+    {
+      "episode": 200,
+      "checkpoint_path": "models/RUN-20260525-0609_ppo_v1_ep200.pt",
+      "reward_mean": 433.14,
+      "success_rate": 0.65
+    },
+    {
+      "episode": 240,
+      "checkpoint_path": "models/RUN-20260525-0609_ppo_v1_ep240.pt",
+      "reward_mean": 413.84,
+      "success_rate": 0.55
+    },
+    {
+      "episode": 280,
+      "checkpoint_path": "models/RUN-20260525-0609_ppo_v1_ep280.pt",
+      "reward_mean": 430.7,
+      "success_rate": 0.65
+    }
+  ]
+}
