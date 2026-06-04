@@ -252,13 +252,6 @@ class DroneEnv:
                     ty = random.uniform(ymin + c, ymax - c)
                     return np.array([tx, ty, tz], dtype=np.float32)
 
-        elif self.ACTIVE_PHASE in [10, 11, 12]:
-            tz = random.uniform(-6.0, -4.0)
-            dist_min, dist_max = 10.0, 200.0
-            self.max_steps = 5000
-            map1_branch = random.choices(["front", "back"], weights=[0.5, 0.5])[0]
-            map2_branch = random.choices(["left", "right", "front", "back"], weights=[0.25, 0.25, 0.25, 0.25])[0]
-
         c = 2.0  # Safe clearance boundary
 
         if self.ACTIVE_PHASE >= 4 and "T1_OpenUrbanGrid" in self.current_map:
@@ -308,19 +301,7 @@ class DroneEnv:
                 elif ep <= 760: chosen_branch = 'hr1_left'
                 elif ep <= 1240: chosen_branch = 'hr1_right'
                 else: chosen_branch = random.choices(['vr2_back', 'vr2_front', 'hr2_left', 'hr2_right', 'hr1_left', 'hr1_right'], [0.15, 0.15, 0.15, 0.15, 0.20, 0.20])[0]
-            elif self.ACTIVE_PHASE == 10:
-                if ep <= 780: chosen_branch = 'vr1_2'
-                elif ep <= 1560: chosen_branch = 'vr3_2'
-                else: chosen_branch = random.choices(['vr2_back', 'vr2_front', 'hr2_left', 'hr2_right', 'hr1_left', 'hr1_right', 'vr1_2', 'vr3_2'], [0.12, 0.12, 0.12, 0.12, 0.12, 0.12, 0.14, 0.14])[0]
-            elif self.ACTIVE_PHASE == 11:
-                if ep <= 960: chosen_branch = 'vr1_1'
-                elif ep <= 1920: chosen_branch = 'vr3_1'
-                else: chosen_branch = random.choices(['vr2_back', 'vr2_front', 'hr2_left', 'hr2_right', 'hr1_left', 'hr1_right', 'vr1_2', 'vr3_2', 'vr1_1', 'vr3_1'], [0.10]*10)[0]
-            elif self.ACTIVE_PHASE == 12:
-                if ep <= 1200: chosen_branch = 'vr1_3'
-                elif ep <= 2400: chosen_branch = 'vr3_3'
-                else: chosen_branch = random.choices(['vr2_back', 'vr2_front', 'hr2_left', 'hr2_right', 'hr1_left', 'hr1_right', 'vr1_1', 'vr1_2', 'vr1_3', 'vr3_1', 'vr3_2', 'vr3_3'], [0.08, 0.08, 0.09, 0.09, 0.09, 0.09, 0.08, 0.08, 0.08, 0.08, 0.08, 0.08])[0]
-
+            
             xmin, xmax, ymin, ymax = boxes[chosen_branch]
             tx = random.uniform(xmin + c, xmax - c)
             ty = random.uniform(ymin + c, ymax - c)
@@ -513,54 +494,6 @@ class DroneEnv:
                 elif rand_w < 0.45: active_strength = random.uniform(0.3, 0.5)
                 elif rand_w < 0.80: active_strength = random.uniform(0.5, 0.8)
                 else: active_strength = random.uniform(0.8, 1.0)
-        elif self.ACTIVE_PHASE == 10:
-            if ep > 1560:
-                rand_w = random.random()
-                if rand_w < 0.15: self.enable_wind = False
-                elif rand_w < 0.45: active_strength = random.uniform(0.3, 0.5)
-                elif rand_w < 0.80: active_strength = random.uniform(0.5, 0.8)
-                else: active_strength = random.uniform(0.8, 1.0)
-            else:
-                cycle_ep = (ep - 1) % 780 + 1
-                if cycle_ep <= 260:
-                    if random.random() < 0.50: self.enable_wind = False
-                    else: active_strength = random.uniform(0.3, 0.5)
-                elif cycle_ep <= 520:
-                    active_strength = random.uniform(0.5, 0.8)
-                else:
-                    active_strength = random.uniform(0.8, 1.0)
-        elif self.ACTIVE_PHASE == 11:
-            if ep > 1920:
-                rand_w = random.random()
-                if rand_w < 0.15: self.enable_wind = False
-                elif rand_w < 0.45: active_strength = random.uniform(0.3, 0.5)
-                elif rand_w < 0.80: active_strength = random.uniform(0.5, 0.8)
-                else: active_strength = random.uniform(0.8, 1.0)
-            else:
-                cycle_ep = (ep - 1) % 960 + 1
-                if cycle_ep <= 320:
-                    if random.random() < 0.50: self.enable_wind = False
-                    else: active_strength = random.uniform(0.3, 0.5)
-                elif cycle_ep <= 640:
-                    active_strength = random.uniform(0.5, 0.8)
-                else:
-                    active_strength = random.uniform(0.8, 1.0)
-        elif self.ACTIVE_PHASE == 12:
-            if ep > 2400:
-                rand_w = random.random()
-                if rand_w < 0.15: self.enable_wind = False
-                elif rand_w < 0.45: active_strength = random.uniform(0.3, 0.5)
-                elif rand_w < 0.80: active_strength = random.uniform(0.5, 0.8)
-                else: active_strength = random.uniform(0.8, 1.0)
-            else:
-                cycle_ep = (ep - 1) % 1200 + 1
-                if cycle_ep <= 400:
-                    if random.random() < 0.50: self.enable_wind = False
-                    else: active_strength = random.uniform(0.3, 0.5)
-                elif cycle_ep <= 800:
-                    active_strength = random.uniform(0.5, 0.8)
-                else:
-                    active_strength = random.uniform(0.8, 1.0)
 
         if self.enable_wind:
             wind_angle = random.uniform(0, 2 * np.pi)
