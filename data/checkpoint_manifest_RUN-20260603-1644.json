@@ -1,0 +1,493 @@
+{
+  "type": "checkpoint.manifest",
+  "run_id": "RUN-20260603-1644",
+  "model_version": "ppo_v1",
+  "checkpoints": [
+    {
+      "episode": 20,
+      "checkpoint_path": "models/RUN-20260603-1644_ppo_v1_ep20.pt",
+      "reward_mean": 5.57,
+      "success_rate": 1.0
+    },
+    {
+      "episode": 40,
+      "checkpoint_path": "models/RUN-20260603-1644_ppo_v1_ep40.pt",
+      "reward_mean": -66.0,
+      "success_rate": 1.0
+    },
+    {
+      "episode": 60,
+      "checkpoint_path": "models/RUN-20260603-1644_ppo_v1_ep60.pt",
+      "reward_mean": -105.61,
+      "success_rate": 1.0
+    },
+    {
+      "episode": 80,
+      "checkpoint_path": "models/RUN-20260603-1644_ppo_v1_ep80.pt",
+      "reward_mean": -124.24,
+      "success_rate": 1.0
+    },
+    {
+      "episode": 100,
+      "checkpoint_path": "models/RUN-20260603-1644_ppo_v1_ep100.pt",
+      "reward_mean": -124.39,
+      "success_rate": 1.0
+    },
+    {
+      "episode": 120,
+      "checkpoint_path": "models/RUN-20260603-1644_ppo_v1_ep120.pt",
+      "reward_mean": -61.79,
+      "success_rate": 1.0
+    },
+    {
+      "episode": 140,
+      "checkpoint_path": "models/RUN-20260603-1644_ppo_v1_ep140.pt",
+      "reward_mean": 15.89,
+      "success_rate": 1.0
+    },
+    {
+      "episode": 160,
+      "checkpoint_path": "models/RUN-20260603-1644_ppo_v1_ep160.pt",
+      "reward_mean": 150.04,
+      "success_rate": 1.0
+    },
+    {
+      "episode": 180,
+      "checkpoint_path": "models/RUN-20260603-1644_ppo_v1_ep180.pt",
+      "reward_mean": 263.6,
+      "success_rate": 1.0
+    },
+    {
+      "episode": 200,
+      "checkpoint_path": "models/RUN-20260603-1644_ppo_v1_ep200.pt",
+      "reward_mean": 343.8,
+      "success_rate": 1.0
+    },
+    {
+      "episode": 220,
+      "checkpoint_path": "models/RUN-20260603-1644_ppo_v1_ep220.pt",
+      "reward_mean": 444.87,
+      "success_rate": 1.0
+    },
+    {
+      "episode": 240,
+      "checkpoint_path": "models/RUN-20260603-1644_ppo_v1_ep240.pt",
+      "reward_mean": 604.27,
+      "success_rate": 1.0
+    },
+    {
+      "episode": 260,
+      "checkpoint_path": "models/RUN-20260603-1644_ppo_v1_ep260.pt",
+      "reward_mean": 668.5,
+      "success_rate": 0.975
+    },
+    {
+      "episode": 280,
+      "checkpoint_path": "models/RUN-20260603-1644_ppo_v1_ep280.pt",
+      "reward_mean": 696.98,
+      "success_rate": 0.975
+    },
+    {
+      "episode": 300,
+      "checkpoint_path": "models/RUN-20260603-1644_ppo_v1_ep300.pt",
+      "reward_mean": 711.1,
+      "success_rate": 1.0
+    },
+    {
+      "episode": 320,
+      "checkpoint_path": "models/RUN-20260603-1644_ppo_v1_ep320.pt",
+      "reward_mean": 728.92,
+      "success_rate": 1.0
+    },
+    {
+      "episode": 340,
+      "checkpoint_path": "models/RUN-20260603-1644_ppo_v1_ep340.pt",
+      "reward_mean": 729.74,
+      "success_rate": 1.0
+    },
+    {
+      "episode": 360,
+      "checkpoint_path": "models/RUN-20260603-1644_ppo_v1_ep360.pt",
+      "reward_mean": 693.37,
+      "success_rate": 1.0
+    },
+    {
+      "episode": 380,
+      "checkpoint_path": "models/RUN-20260603-1644_ppo_v1_ep380.pt",
+      "reward_mean": 655.67,
+      "success_rate": 1.0
+    },
+    {
+      "episode": 400,
+      "checkpoint_path": "models/RUN-20260603-1644_ppo_v1_ep400.pt",
+      "reward_mean": 688.2,
+      "success_rate": 1.0
+    },
+    {
+      "episode": 420,
+      "checkpoint_path": "models/RUN-20260603-1644_ppo_v1_ep420.pt",
+      "reward_mean": 735.61,
+      "success_rate": 1.0
+    },
+    {
+      "episode": 440,
+      "checkpoint_path": "models/RUN-20260603-1644_ppo_v1_ep440.pt",
+      "reward_mean": 680.33,
+      "success_rate": 1.0
+    },
+    {
+      "episode": 460,
+      "checkpoint_path": "models/RUN-20260603-1644_ppo_v1_ep460.pt",
+      "reward_mean": 698.19,
+      "success_rate": 1.0
+    },
+    {
+      "episode": 480,
+      "checkpoint_path": "models/RUN-20260603-1644_ppo_v1_ep480.pt",
+      "reward_mean": 689.6,
+      "success_rate": 1.0
+    },
+    {
+      "episode": 500,
+      "checkpoint_path": "models/RUN-20260603-1644_ppo_v1_ep500.pt",
+      "reward_mean": 728.11,
+      "success_rate": 1.0
+    },
+    {
+      "episode": 520,
+      "checkpoint_path": "models/RUN-20260603-1644_ppo_v1_ep520.pt",
+      "reward_mean": 593.08,
+      "success_rate": 0.9
+    },
+    {
+      "episode": 540,
+      "checkpoint_path": "models/RUN-20260603-1644_ppo_v1_ep540.pt",
+      "reward_mean": 602.26,
+      "success_rate": 0.9
+    },
+    {
+      "episode": 560,
+      "checkpoint_path": "models/RUN-20260603-1644_ppo_v1_ep560.pt",
+      "reward_mean": 633.39,
+      "success_rate": 0.975
+    },
+    {
+      "episode": 580,
+      "checkpoint_path": "models/RUN-20260603-1644_ppo_v1_ep580.pt",
+      "reward_mean": 687.63,
+      "success_rate": 0.975
+    },
+    {
+      "episode": 600,
+      "checkpoint_path": "models/RUN-20260603-1644_ppo_v1_ep600.pt",
+      "reward_mean": 550.25,
+      "success_rate": 0.825
+    },
+    {
+      "episode": 620,
+      "checkpoint_path": "models/RUN-20260603-1644_ppo_v1_ep620.pt",
+      "reward_mean": 578.22,
+      "success_rate": 0.825
+    },
+    {
+      "episode": 640,
+      "checkpoint_path": "models/RUN-20260603-1644_ppo_v1_ep640.pt",
+      "reward_mean": 485.74,
+      "success_rate": 0.725
+    },
+    {
+      "episode": 660,
+      "checkpoint_path": "models/RUN-20260603-1644_ppo_v1_ep660.pt",
+      "reward_mean": 462.71,
+      "success_rate": 0.625
+    },
+    {
+      "episode": 680,
+      "checkpoint_path": "models/RUN-20260603-1644_ppo_v1_ep680.pt",
+      "reward_mean": 524.86,
+      "success_rate": 0.875
+    },
+    {
+      "episode": 700,
+      "checkpoint_path": "models/RUN-20260603-1644_ppo_v1_ep700.pt",
+      "reward_mean": 686.64,
+      "success_rate": 0.95
+    },
+    {
+      "episode": 720,
+      "checkpoint_path": "models/RUN-20260603-1644_ppo_v1_ep720.pt",
+      "reward_mean": 485.86,
+      "success_rate": 0.775
+    },
+    {
+      "episode": 740,
+      "checkpoint_path": "models/RUN-20260603-1644_ppo_v1_ep740.pt",
+      "reward_mean": 436.81,
+      "success_rate": 0.725
+    },
+    {
+      "episode": 760,
+      "checkpoint_path": "models/RUN-20260603-1644_ppo_v1_ep760.pt",
+      "reward_mean": 537.12,
+      "success_rate": 0.85
+    },
+    {
+      "episode": 780,
+      "checkpoint_path": "models/RUN-20260603-1644_ppo_v1_ep780.pt",
+      "reward_mean": 664.12,
+      "success_rate": 0.9
+    },
+    {
+      "episode": 800,
+      "checkpoint_path": "models/RUN-20260603-1644_ppo_v1_ep800.pt",
+      "reward_mean": 590.95,
+      "success_rate": 0.825
+    },
+    {
+      "episode": 820,
+      "checkpoint_path": "models/RUN-20260603-1644_ppo_v1_ep820.pt",
+      "reward_mean": 599.7,
+      "success_rate": 0.85
+    },
+    {
+      "episode": 840,
+      "checkpoint_path": "models/RUN-20260603-1644_ppo_v1_ep840.pt",
+      "reward_mean": 662.76,
+      "success_rate": 1.0
+    },
+    {
+      "episode": 860,
+      "checkpoint_path": "models/RUN-20260603-1644_ppo_v1_ep860.pt",
+      "reward_mean": 723.25,
+      "success_rate": 1.0
+    },
+    {
+      "episode": 880,
+      "checkpoint_path": "models/RUN-20260603-1644_ppo_v1_ep880.pt",
+      "reward_mean": 685.33,
+      "success_rate": 1.0
+    },
+    {
+      "episode": 900,
+      "checkpoint_path": "models/RUN-20260603-1644_ppo_v1_ep900.pt",
+      "reward_mean": 585.0,
+      "success_rate": 0.925
+    },
+    {
+      "episode": 920,
+      "checkpoint_path": "models/RUN-20260603-1644_ppo_v1_ep920.pt",
+      "reward_mean": 601.53,
+      "success_rate": 0.925
+    },
+    {
+      "episode": 940,
+      "checkpoint_path": "models/RUN-20260603-1644_ppo_v1_ep940.pt",
+      "reward_mean": 604.23,
+      "success_rate": 0.875
+    },
+    {
+      "episode": 960,
+      "checkpoint_path": "models/RUN-20260603-1644_ppo_v1_ep960.pt",
+      "reward_mean": 591.82,
+      "success_rate": 0.8
+    },
+    {
+      "episode": 980,
+      "checkpoint_path": "models/RUN-20260603-1644_ppo_v1_ep980.pt",
+      "reward_mean": 671.43,
+      "success_rate": 0.925
+    },
+    {
+      "episode": 1000,
+      "checkpoint_path": "models/RUN-20260603-1644_ppo_v1_ep1000.pt",
+      "reward_mean": 630.09,
+      "success_rate": 1.0
+    },
+    {
+      "episode": 1020,
+      "checkpoint_path": "models/RUN-20260603-1644_ppo_v1_ep1020.pt",
+      "reward_mean": 484.69,
+      "success_rate": 0.875
+    },
+    {
+      "episode": 1040,
+      "checkpoint_path": "models/RUN-20260603-1644_ppo_v1_ep1040.pt",
+      "reward_mean": 401.93,
+      "success_rate": 0.8
+    },
+    {
+      "episode": 1060,
+      "checkpoint_path": "models/RUN-20260603-1644_ppo_v1_ep1060.pt",
+      "reward_mean": 520.17,
+      "success_rate": 0.85
+    },
+    {
+      "episode": 1080,
+      "checkpoint_path": "models/RUN-20260603-1644_ppo_v1_ep1080.pt",
+      "reward_mean": 670.66,
+      "success_rate": 0.9
+    },
+    {
+      "episode": 1100,
+      "checkpoint_path": "models/RUN-20260603-1644_ppo_v1_ep1100.pt",
+      "reward_mean": 738.04,
+      "success_rate": 0.95
+    },
+    {
+      "episode": 1120,
+      "checkpoint_path": "models/RUN-20260603-1644_ppo_v1_ep1120.pt",
+      "reward_mean": 671.32,
+      "success_rate": 0.95
+    },
+    {
+      "episode": 1140,
+      "checkpoint_path": "models/RUN-20260603-1644_ppo_v1_ep1140.pt",
+      "reward_mean": 679.54,
+      "success_rate": 0.95
+    },
+    {
+      "episode": 1160,
+      "checkpoint_path": "models/RUN-20260603-1644_ppo_v1_ep1160.pt",
+      "reward_mean": 674.25,
+      "success_rate": 0.9
+    },
+    {
+      "episode": 1180,
+      "checkpoint_path": "models/RUN-20260603-1644_ppo_v1_ep1180.pt",
+      "reward_mean": 647.03,
+      "success_rate": 0.8
+    },
+    {
+      "episode": 1200,
+      "checkpoint_path": "models/RUN-20260603-1644_ppo_v1_ep1200.pt",
+      "reward_mean": 540.52,
+      "success_rate": 0.675
+    },
+    {
+      "episode": 1220,
+      "checkpoint_path": "models/RUN-20260603-1644_ppo_v1_ep1220.pt",
+      "reward_mean": 637.14,
+      "success_rate": 0.8
+    },
+    {
+      "episode": 1240,
+      "checkpoint_path": "models/RUN-20260603-1644_ppo_v1_ep1240.pt",
+      "reward_mean": 576.78,
+      "success_rate": 1.0
+    },
+    {
+      "episode": 1260,
+      "checkpoint_path": "models/RUN-20260603-1644_ppo_v1_ep1260.pt",
+      "reward_mean": 402.1,
+      "success_rate": 1.0
+    },
+    {
+      "episode": 1280,
+      "checkpoint_path": "models/RUN-20260603-1644_ppo_v1_ep1280.pt",
+      "reward_mean": 281.56,
+      "success_rate": 0.975
+    },
+    {
+      "episode": 1300,
+      "checkpoint_path": "models/RUN-20260603-1644_ppo_v1_ep1300.pt",
+      "reward_mean": 152.11,
+      "success_rate": 0.95
+    },
+    {
+      "episode": 1320,
+      "checkpoint_path": "models/RUN-20260603-1644_ppo_v1_ep1320.pt",
+      "reward_mean": 235.56,
+      "success_rate": 0.85
+    },
+    {
+      "episode": 1340,
+      "checkpoint_path": "models/RUN-20260603-1644_ppo_v1_ep1340.pt",
+      "reward_mean": 187.74,
+      "success_rate": 0.825
+    },
+    {
+      "episode": 1360,
+      "checkpoint_path": "models/RUN-20260603-1644_ppo_v1_ep1360.pt",
+      "reward_mean": 28.39,
+      "success_rate": 0.925
+    },
+    {
+      "episode": 1380,
+      "checkpoint_path": "models/RUN-20260603-1644_ppo_v1_ep1380.pt",
+      "reward_mean": 237.88,
+      "success_rate": 0.875
+    },
+    {
+      "episode": 1400,
+      "checkpoint_path": "models/RUN-20260603-1644_ppo_v1_ep1400.pt",
+      "reward_mean": 275.68,
+      "success_rate": 0.85
+    },
+    {
+      "episode": 1420,
+      "checkpoint_path": "models/RUN-20260603-1644_ppo_v1_ep1420.pt",
+      "reward_mean": 188.24,
+      "success_rate": 0.925
+    },
+    {
+      "episode": 1440,
+      "checkpoint_path": "models/RUN-20260603-1644_ppo_v1_ep1440.pt",
+      "reward_mean": 161.72,
+      "success_rate": 0.975
+    },
+    {
+      "episode": 1460,
+      "checkpoint_path": "models/RUN-20260603-1644_ppo_v1_ep1460.pt",
+      "reward_mean": 192.67,
+      "success_rate": 1.0
+    },
+    {
+      "episode": 1480,
+      "checkpoint_path": "models/RUN-20260603-1644_ppo_v1_ep1480.pt",
+      "reward_mean": 260.95,
+      "success_rate": 1.0
+    },
+    {
+      "episode": 1500,
+      "checkpoint_path": "models/RUN-20260603-1644_ppo_v1_ep1500.pt",
+      "reward_mean": 235.51,
+      "success_rate": 0.925
+    },
+    {
+      "episode": 1520,
+      "checkpoint_path": "models/RUN-20260603-1644_ppo_v1_ep1520.pt",
+      "reward_mean": 328.05,
+      "success_rate": 0.875
+    },
+    {
+      "episode": 1540,
+      "checkpoint_path": "models/RUN-20260603-1644_ppo_v1_ep1540.pt",
+      "reward_mean": 301.32,
+      "success_rate": 0.95
+    },
+    {
+      "episode": 1560,
+      "checkpoint_path": "models/RUN-20260603-1644_ppo_v1_ep1560.pt",
+      "reward_mean": 264.98,
+      "success_rate": 0.975
+    },
+    {
+      "episode": 1580,
+      "checkpoint_path": "models/RUN-20260603-1644_ppo_v1_ep1580.pt",
+      "reward_mean": 215.74,
+      "success_rate": 0.875
+    },
+    {
+      "episode": 1600,
+      "checkpoint_path": "models/RUN-20260603-1644_ppo_v1_ep1600.pt",
+      "reward_mean": 297.41,
+      "success_rate": 0.8
+    },
+    {
+      "episode": 1620,
+      "checkpoint_path": "models/RUN-20260603-1644_ppo_v1_ep1620.pt",
+      "reward_mean": 268.6,
+      "success_rate": 0.85
+    }
+  ]
+}
