@@ -194,7 +194,7 @@ def _run_eval_checkpoint(env, agent, mean, std, log_episode, max_episodes, all_r
         
         torch.save(agent.policy.state_dict(), os.path.join(chkpt_dir, f"ppo_phase9_ep{log_episode}.pt"))
 
-    print("Eval @ ep {} | success: {:.2%} | collision: {:.2%} | oob: {:.2%} | avg_len: {}".format(
+    # print("Eval @ ep {} | success: {:.2%} | collision: {:.2%} | oob: {:.2%} | avg_len: {}".format(
         log_episode, eval_metrics["success_rate"], eval_metrics["collision_rate"], eval_metrics["oob_rate"], eval_metrics["avg_episode_length"]))
     if eval_hard is not None:
         print("Eval-Hard @ ep {} | success: {:.2%} | collision: {:.2%} | oob: {:.2%} | avg_len: {}".format(
