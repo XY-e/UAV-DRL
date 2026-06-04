@@ -104,34 +104,6 @@ Ep 1221–1620    Full Random Box Coordinates      Mixed + Strong Wind
 [Total Episodes: 1620]
 
 
-Phase 10 — 2-Turn Short Route Mastery
---------------------------------------------------------------------------------
-Episode Range   Target Route (Map 3)       Wind                  Max Steps
-Ep 1–780        Vertical Road 1.2 (R)      Progressive Wind      5000
-Ep 781–1560     Vertical Road 3.2 (L)      Progressive Wind      5000
-Ep 1561–2040    Mixed Comprehensive        Mixed + Strong        5000
-[Total Episodes: 2040]
-
-
-Phase 11 — Deep 2-Turn Route Mastery
---------------------------------------------------------------------------------
-Episode Range   Target Route (Map 3)       Wind                  Max Steps
-Ep 1–960        Vertical Road 1.1 (R)      Progressive Wind      5000
-Ep 961–1920     Vertical Road 3.1 (L)      Progressive Wind      5000
-Ep 1921–2560    Mixed Comprehensive        Mixed + Strong        5000
-[Total Episodes: 2560]
-
-
-Phase 12 — Backward 2-Turn Route Mastery
---------------------------------------------------------------------------------
-Episode Range   Target Route (Map 3)       Wind                  Max Steps
-Ep 1–1200       Vertical Road 1.3 (R)      Progressive Wind      5000
-Ep 1201–2400    Vertical Road 3.3 (L)      Progressive Wind      5000
-Ep 2401–3200    Mixed Comprehensive        Mixed + Strong        5000
-[Total Episodes: 3200]
-
-
-
 ================================================================================
                     MAP SPAWN DISTRIBUTIONS & COORDINATES
 ================================================================================
@@ -152,20 +124,13 @@ Back       25%          70%
 
 MAP 3 MIXED COMPREHENSIVE ROUTES
 --------------------------------------------------------------------------------
-Route                          Phase 6-9      Phase 10     Phase 11     Phase 12
-vr2_back                       15%            12%          10%          8%
-vr2_front                      15%            12%          10%          8%
-hr2_left                       15%            12%          10%          9%
-hr2_right                      15%            12%          10%          9%
-hr1.1_left (1-turn)            20%            12%          10%          9%
-hr1.1_right (1-turn)           20%            12%          10%          9%
-vr1_2 (2-turn short)           0%             14%          10%          8%
-vr3_2 (2-turn short)           0%             14%          10%          8%
-vr1_1 (2-turn deep)            0%             0%           10%          8%
-vr3_1 (2-turn deep)            0%             0%           10%          8%
-vr1_3 (2-turn backward)        0%             0%           0%           8%
-vr3_3 (2-turn backward)        0%             0%           0%           8%
-
+Route                          Phase 6-9      
+vr2_back                       15%            
+vr2_front                      15%            
+hr2_left                       15%            
+hr2_right                      15%            
+hr1.1_left (1-turn)            20%            
+hr1.1_right (1-turn)           20%            
 
 MAP 3 TARGET BOUNDING BOXES
 --------------------------------------------------------------------------------
@@ -176,12 +141,6 @@ hr2_left              63.2    73.2      -104.5    0.0
 hr2_right             63.2    73.2      0.0       104.5 
 hr1_left              115.0   125.0     -104.5    -20.0 
 hr1_right             115.0   125.0     20.0      104.5 
-vr1_1                 125.0   163.8     -59.8     -49.8 
-vr1_2                 73.0    115.0     -59.8     -49.8 
-vr1_3                 15.8    63.0      -59.8     -49.8 
-vr3_1                 125.0   163.8     49.8      59.8 
-vr3_2                 73.0    115.0     49.8      59.8 
-vr3_3                 15.8    63.0      49.8      59.8 
 
 *Phase 9 Specific Overrides (Part 3 Mixed Only):
 vr2_back:  X(17.8, 68.0), Y(-3.0, 3.0)
@@ -207,7 +166,8 @@ hr1.1_right: X(117.0, 123.0), Y(20.0, 48.0)
 - Training Ep 0% - 75%: 2.5m success radius
 - Training Ep 75% - 100%: 2.0m success radius
 
-3. Map Distributions (Phases 10-12)
-- Map 1: 12% probability
-- Map 2: 24% probability
+3. Map Distributions (Phase 9 Mixed Phase)
+- Map 1: 20% probability
+- Map 2: 30% probability
+- Map 3: 50% probability
 - Map 3: 64% probability
