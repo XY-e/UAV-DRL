@@ -8,7 +8,7 @@
 --------------------------------------------------------------------------------
 PROGRESS_CLIP_M            : 2.0 meters (Max distance delta evaluated per step)
 MAX_STEP_REWARD_PHASE_1_8  : +5.0 (Reward cap to prevent exploitation)
-MAX_STEP_REWARD_PHASE_9_12 : +12.0 (Higher cap for complex maneuvers)
+MAX_STEP_REWARD_PHASE_9 : +12.0 (Higher cap for complex maneuvers)
 HOVER_PENALTY_MIN          : 0.5
 HOVER_PENALTY_MAX          : 3.0
 HOVER_RAMP_EP              : 300 (Penalty scales from MIN to MAX over 300 eps)
@@ -70,7 +70,7 @@ F. Control Smoothness & Environment
 - Time Pressure: -0.03 per step.
 
 ================================================================================
-                    PHASE 9-12: ADVANCED URBAN NAVIGATION
+                    PHASE 9: ADVANCED URBAN NAVIGATION
 ================================================================================
 INTENT: Teach the drone to navigate tight city blocks, perform sharp 90-degree
 turns, brake for obstacles, and fly holonomically.
@@ -104,7 +104,6 @@ D. Anti-Hovering (Locomotion Enforcement)
 
 E. Holonomic Locomotion & Alignment
 - Alignment: Calculates dot product of velocity and goal vectors.
-- Phase 12 Boost: If alignment > 0.85 AND front clear (>8m) AND far from goal (>15m) -> +3.0 * alignment * min(vel, 2.5).
 - Standard Boost: +1.5 * alignment * min(vel, 2.0).
 - Diagonal Pen:   Prevents "corner cutting" by penalizing simultaneous high X and Y velocity: -3.0 * (vx * vy) if product > 0.15.
 
@@ -118,5 +117,4 @@ G. Lateral/Vertical Correction & Environment
 - Lateral Slide: -0.2 * lateral speed * (1.0 - max(alignment, 0)).
 - Vert Drift:    -0.1 * vertical speed * (1.0 - abs(Goal Z)) (Disabled during dynamic obstacle evasion).
 - Wind Drift:    Same mathematical bounds as Phase 1-8.
-- Time Pressure: -0.12 (Phase 12) or -0.07 (Phase 9-11).
-- Rebate:        +0.04 returned in Phase 12 if cruising fast and accurately in open space.
+- Time Pressure: -0.07.
