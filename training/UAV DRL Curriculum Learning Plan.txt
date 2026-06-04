@@ -1,0 +1,213 @@
+================================================================================
+                    UAV DRL CURRICULUM LEARNING PLAN
+================================================================================
+
+Phase 1 — Straight & Wind Training (Map 1)
+--------------------------------------------------------------------------------
+Episode Range   Target Dist.   Max Steps   Wind             Map     Altitude
+Ep 1–80         5–10m          350         No Wind          Map 1   -4m to -6m
+Ep 81–200       10–15m         550         No Wind          Map 1   -4m to -6m
+Ep 201–280      10–15m         600         Light (0.3–0.5)  Map 1   -4m to -6m
+Ep 281–400      15–20m         800         Light (0.3–0.5)  Map 1   -4m to -6m
+Ep 401–520      20–25m         1000        Light (0.3–0.5)  Map 1   -4m to -6m
+[Total Episodes: 520]
+
+
+Phase 2 — Lateral Training
+--------------------------------------------------------------------------------
+Episode Range   Target Dist.   Max Steps   Wind             Map Mix       Altitude
+Ep 1–280        10–20m         800         Light (0.3-0.5)  M1:30/M2:70   High (-8 to -10m)
+Ep 281–560      15–25m         1000        Mod (0.5-0.8)    M1:30/M2:70   High (-8 to -10m)
+*Map 2 Start Position Split: 50% at (10, -46.0) | 50% at (-10, -46.0)
+[Total Episodes: 560]
+
+
+Phase 3 — Turning Left & Right
+--------------------------------------------------------------------------------
+Episode Range   Target Dist.   Max Steps   Wind             Map Mix       Altitude
+Ep 1–80         10–30m         1800        Light            M1:30/M2:70   High (-8 to -10m)
+Ep 81–200       15–45m* 2200        Light            M1:30/M2:70   High (-8 to -10m)
+Ep 201–320      15–60m* 2200        Mod              M1:30/M2:70   High (-8 to -10m)
+*(90% long range, 10% short range 15-30m)
+[Total Episodes: 320]
+
+
+Phase 4 — Street-Level Dynamics
+--------------------------------------------------------------------------------
+Episode Range   Target Dist.   Max Steps   Wind             Map Mix       Altitude
+Ep 1–280        25–45m         3000        Mixed** M1:20/M2:80   -4m to -6m
+Ep 281–560      35–60m         3000        Mixed** M1:20/M2:80   -4m to -6m
+**(20% No Wind, 30% Light, 50% Moderate)
+[Total Episodes: 560]
+
+
+Phase 5 — Backward Recovery & Boundary Preservation
+--------------------------------------------------------------------------------
+Episode Range   Target Dist.   Max Steps   Wind             Map Mix       Altitude
+Ep 1–120        35–60m         3000        70%NW/30%L       M1:20/M2:80   -4m to -6m
+Ep 121–240      35–60m         3000        50%L/50%M        M1:20/M2:80   -4m to -6m
+Ep 241–320      35–60m         3000        Mixed            M1:20/M2:80   -4m to -6m
+[Total Episodes: 320]
+
+
+Phase 6 — Dense & Comprehensive Training
+--------------------------------------------------------------------------------
+Episode Range   Target Dist.   Max Steps   Wind             Map Mix       Altitude
+Ep 1–400        10–100m        3000        Mixed            1:20/2:30/3:50  -4m to -6m
+[Total Episodes: 400]
+
+
+Phase 7 — Advanced Turning & Strong Wind
+--------------------------------------------------------------------------------
+Episode Range   Target Route (Map 3)       Wind                  Max Steps
+Ep 1–80         Vertical Back              Mixed + Strong        3000
+Ep 81–160       Vertical Front             Mixed + Strong        3000
+Ep 161–280      Horizontal Left            Mixed + Strong        3000
+Ep 281–360      Horizontal Right           Mixed + Strong        3000
+Ep 361–600      One Turn Left              Progressive Wind* 4000
+Ep 601–840      One Turn Right             Progressive Wind* 4000
+Ep 841–1040     Mixed Comprehensive        Mixed + Strong        4000
+*(Progressive Wind: 50%NW/L -> 100% Mod -> 100% Strong)
+[Total Episodes: 1040]
+
+
+Phase 8 — Focused Turning Reinforcement
+--------------------------------------------------------------------------------
+Episode Range   Target Route (Map 3)       Wind                  Max Steps
+Ep 1–120        Horizontal Left            Mixed + Strong        3000
+Ep 121–280      Horizontal Right           Mixed + Strong        3000
+Ep 281–760      One Turn Left              Progressive Wind      4000
+Ep 761–1240     One Turn Right             Progressive Wind      4000
+Ep 1241–1640    Mixed Comprehensive        Mixed + Strong        4000
+[Total Episodes: 1640]
+
+
+Phase 9 — High-Altitude Turning Mastery (1620 Episodes)
+--------------------------------------------------------------------------------
+Altitude: High (-8.0m to -10.0m)
+
+Part 1: Straight Approach
+Ep 1–20         Target X = 90.0m | Y = 0.0m      Progressive Wind
+...             (+3m X every 20 episodes)        Progressive Wind
+Ep 201–220      Target X = 120.0m | Y = 0.0m     Progressive Wind
+
+Part 2: Left & Right Turn Focus (Target X locked at 120.0m)
+Ep 221–240      Target Y = -3.0m  (Left Turn)    Progressive Wind
+Ep 241–260      Target Y = 3.0m   (Right Turn)   Progressive Wind
+...             (Alternates L/R, depth +3m)      Progressive Wind
+Ep 581–620      Target Y = +/- 30.0m             Progressive Wind
+Ep 621–860      Target Y = +/- 33m to 39m        [40 Eps per side]
+Ep 861–1220     Target Y = +/- 42m to 48m        [60 Eps per side]
+
+Part 3: Comprehensive Mixed Maps
+Ep 1221–1620    Full Random Box Coordinates      Mixed + Strong Wind
+[Total Episodes: 1620]
+
+
+Phase 10 — 2-Turn Short Route Mastery
+--------------------------------------------------------------------------------
+Episode Range   Target Route (Map 3)       Wind                  Max Steps
+Ep 1–780        Vertical Road 1.2 (R)      Progressive Wind      5000
+Ep 781–1560     Vertical Road 3.2 (L)      Progressive Wind      5000
+Ep 1561–2040    Mixed Comprehensive        Mixed + Strong        5000
+[Total Episodes: 2040]
+
+
+Phase 11 — Deep 2-Turn Route Mastery
+--------------------------------------------------------------------------------
+Episode Range   Target Route (Map 3)       Wind                  Max Steps
+Ep 1–960        Vertical Road 1.1 (R)      Progressive Wind      5000
+Ep 961–1920     Vertical Road 3.1 (L)      Progressive Wind      5000
+Ep 1921–2560    Mixed Comprehensive        Mixed + Strong        5000
+[Total Episodes: 2560]
+
+
+Phase 12 — Backward 2-Turn Route Mastery
+--------------------------------------------------------------------------------
+Episode Range   Target Route (Map 3)       Wind                  Max Steps
+Ep 1–1200       Vertical Road 1.3 (R)      Progressive Wind      5000
+Ep 1201–2400    Vertical Road 3.3 (L)      Progressive Wind      5000
+Ep 2401–3200    Mixed Comprehensive        Mixed + Strong        5000
+[Total Episodes: 3200]
+
+
+
+================================================================================
+                    MAP SPAWN DISTRIBUTIONS & COORDINATES
+================================================================================
+
+MAP 1 TARGET AREAS
+--------------------------------------------------------------------------------
+Area       Phase 4      Phase 5 (Early)   Phase 5 (Late) / 6+
+Front      60%          40%               50%
+Back       40%          60%               50%
+
+MAP 2 TARGET AREAS
+--------------------------------------------------------------------------------
+Area       Phase 4/6+   Phase 5 (Early)
+Left       25%          10%
+Right      25%          10%
+Front      25%          10%
+Back       25%          70%
+
+MAP 3 MIXED COMPREHENSIVE ROUTES
+--------------------------------------------------------------------------------
+Route                          Phase 6-9      Phase 10     Phase 11     Phase 12
+vr2_back                       15%            12%          10%          8%
+vr2_front                      15%            12%          10%          8%
+hr2_left                       15%            12%          10%          9%
+hr2_right                      15%            12%          10%          9%
+hr1.1_left (1-turn)            20%            12%          10%          9%
+hr1.1_right (1-turn)           20%            12%          10%          9%
+vr1_2 (2-turn short)           0%             14%          10%          8%
+vr3_2 (2-turn short)           0%             14%          10%          8%
+vr1_1 (2-turn deep)            0%             0%           10%          8%
+vr3_1 (2-turn deep)            0%             0%           10%          8%
+vr1_3 (2-turn backward)        0%             0%           0%           8%
+vr3_3 (2-turn backward)        0%             0%           0%           8%
+
+
+MAP 3 TARGET BOUNDING BOXES
+--------------------------------------------------------------------------------
+Route                 X-Min   X-Max     Y-Min     Y-Max
+vr2_back              15.8    70.0      -5.0      5.0 
+vr2_front             70.0    163.8     -5.0      5.0 
+hr2_left              63.2    73.2      -104.5    0.0 
+hr2_right             63.2    73.2      0.0       104.5 
+hr1_left              115.0   125.0     -104.5    -20.0 
+hr1_right             115.0   125.0     20.0      104.5 
+vr1_1                 125.0   163.8     -59.8     -49.8 
+vr1_2                 73.0    115.0     -59.8     -49.8 
+vr1_3                 15.8    63.0      -59.8     -49.8 
+vr3_1                 125.0   163.8     49.8      59.8 
+vr3_2                 73.0    115.0     49.8      59.8 
+vr3_3                 15.8    63.0      49.8      59.8 
+
+*Phase 9 Specific Overrides (Part 3 Mixed Only):
+vr2_back:  X(17.8, 68.0), Y(-3.0, 3.0)
+vr2_front: X(72.0, 161.8), Y(-3.0, 3.0)
+hr2_left:  X(65.2, 71.2), Y(-102.5, -2.0)
+hr2_right: X(65.2, 71.2), Y(2.0, 102.5)
+hr1.1_left: X(117.0, 123.0), Y(-48.0, -20.0)
+hr1.1_right: X(117.0, 123.0), Y(20.0, 48.0)
+
+
+================================================================================
+                    GENERAL CURRICULUM RULES
+================================================================================
+
+1. Wind Vectors
+- No Wind (NW): 0.0 m/s
+- Light Wind (L): 0.3 - 0.5 m/s
+- Moderate Wind (M): 0.5 - 0.8 m/s
+- Strong Wind (S): 0.8 - 1.0 m/s
+- Mixed + Strong: 15% NW / 30% L / 35% M / 20% S
+
+2. Goal Threshold Progress
+- Training Ep 0% - 75%: 2.5m success radius
+- Training Ep 75% - 100%: 2.0m success radius
+
+3. Map Distributions (Phases 10-12)
+- Map 1: 12% probability
+- Map 2: 24% probability
+- Map 3: 64% probability
