@@ -76,13 +76,20 @@ def evaluate_policy(env, agent, mean, std, eval_episodes=10, base_seed=2026, cur
     np_state = np.random.get_state()
     successes, collisions, oob = 0, 0, 0
     rewards, lengths = [], []
+    eval_target_cache = None
 
     try:
         for idx in range(eval_episodes):
             random.seed(base_seed + idx)
             np.random.seed(base_seed + idx)
             env.set_curriculum_progress(curriculum_progress)
+            
+            env.set_episode_context(log_episode, phase=log_phase)
             state = env.reset() 
+            
+            if eval_target_cache is None:
+                eval_target_cache = env.target.copy()
+                
             done = False        
             episode_reward = 0.0 
             episode_steps = 0    
@@ -133,6 +140,7 @@ def evaluate_policy(env, agent, mean, std, eval_episodes=10, base_seed=2026, cur
         "oob_rate": oob / max(1, eval_episodes),
         "avg_reward": float(np.mean(rewards)) if rewards else 0.0,
         "avg_episode_length": int(np.mean(lengths)) if lengths else 0,
+        "eval_target": eval_target_cache
     }
 
 def _prepare_train_episode(env, episodes_completed, max_episodes):
@@ -169,6 +177,23 @@ def _run_eval_checkpoint(env, agent, mean, std, log_episode, max_episodes, all_r
     logger.log_evaluation(log_episode, eval_metrics)
     if eval_hard is not None: logger.log_hard_evaluation(log_episode, eval_hard)
 
+    if env.ACTIVE_PHASE == 9:
+        target = eval_metrics.get("eval_target")
+        if target is None: target = [0.0, 0.0, 0.0]
+        
+        manifest_file = os.path.join(project_root, "phase9_checkpoint_manifest.csv")
+        chkpt_dir = os.path.join(project_root, "checkpoints", "phase9")
+        os.makedirs(chkpt_dir, exist_ok=True)
+        
+        if not os.path.exists(manifest_file):
+            with open(manifest_file, "w") as f:
+                f.write("Episode,Target_X,Target_Y,Target_Z,Success_Rate,Avg_Reward\n")
+        
+        with open(manifest_file, "a") as f:
+            f.write(f"{log_episode},{target[0]:.2f},{target[1]:.2f},{target[2]:.2f},{eval_metrics['success_rate']:.2f},{eval_metrics['avg_reward']:.2f}\n")
+        
+        torch.save(agent.policy.state_dict(), os.path.join(chkpt_dir, f"ppo_phase9_ep{log_episode}.pt"))
+
     print("Eval @ ep {} | success: {:.2%} | collision: {:.2%} | oob: {:.2%} | avg_len: {}".format(
         log_episode, eval_metrics["success_rate"], eval_metrics["collision_rate"], eval_metrics["oob_rate"], eval_metrics["avg_episode_length"]))
     if eval_hard is not None:
@@ -187,7 +212,7 @@ def train(env, agent, max_episodes=2000):
     logger = TrainingLogger(agent, max_episodes)
 
     rollout_target_steps = 2048
-    eval_interval = 40
+    eval_interval = 20 if env.ACTIVE_PHASE == 9 else 40
     eval_episodes = 5
     collected_steps = 0
     successes_list = []
@@ -202,9 +227,6 @@ def train(env, agent, max_episodes=2000):
         ep = episodes_completed + 1
         active_phase = env.ACTIVE_PHASE
 
-        # ======================================================================
-        # 🗺️ PROGRESSIVE MAP CURRICULUM (8 PHASES)
-        # ======================================================================
         if active_phase == 1:
             target_map = "T1_OpenUrbanGrid"
         elif active_phase in [2, 3]:
@@ -212,16 +234,13 @@ def train(env, agent, max_episodes=2000):
         elif active_phase == 4:
             target_map = random.choices(["T1_OpenUrbanGrid", "T2_MediumCityBlocks"], weights=[0.2, 0.8])[0]
         elif active_phase == 5:
-            # Phase 5: Map 1 (20%) | Map 2 (80%)
             target_map = random.choices(["T1_OpenUrbanGrid", "T2_MediumCityBlocks"], weights=[0.2, 0.8])[0]
         elif active_phase == 6:
-            # Phase 6: Map 1 (20%) | Map 2 (30%) | Map 3 (50%)
             target_map = random.choices(["T1_OpenUrbanGrid", "T2_MediumCityBlocks", "T3_Wind"], weights=[0.2, 0.3, 0.5])[0]
         elif active_phase == 7:
             if episodes_completed < 840:
                 target_map = "T3_Wind"
             else:
-                # Ep 840 - 1040: Map 1 (20%) | Map 2 (30%) | Map 3 (50%)
                 target_map = random.choices(["T1_OpenUrbanGrid", "T2_MediumCityBlocks", "T3_Wind"], weights=[0.2, 0.3, 0.5])[0]
         elif active_phase == 8:
             if episodes_completed < 1240:
@@ -229,10 +248,9 @@ def train(env, agent, max_episodes=2000):
             else:
                 target_map = random.choices(["T1_OpenUrbanGrid", "T2_MediumCityBlocks", "T3_Wind"], weights=[0.2, 0.3, 0.5])[0]
         elif active_phase == 9:
-            if episodes_completed < 600:
+            if episodes_completed < 1220:
                 target_map = "T3_Wind"
             else:
-                # target_map = random.choices(["T1_OpenUrbanGrid", "T2_MediumCityBlocks", "T3_Wind"], weights=[0.20, 0.30, 0.50])[0]
                 if episodes_completed % 40 == 0 or 'current_phase_map' not in locals():
                     current_phase_map = random.choices(["T1_OpenUrbanGrid", "T2_MediumCityBlocks", "T3_Wind"], weights=[0.20, 0.30, 0.50])[0]
                 target_map = current_phase_map
@@ -255,15 +273,15 @@ def train(env, agent, max_episodes=2000):
         if env.current_map != target_map or episodes_completed == 0:
             if env.current_map != target_map:
                 env.switch_map(target_map)
-                print(f"🔄 Switched to {target_map}")
+                print(f"Switched to {target_map}")
             std = STATE_STD[target_map].copy() 
-            print(f"📏 Scales refreshed for {target_map}")
+            print(f"Scales refreshed for {target_map}")
 
         display_ep = episodes_completed + 1
         env.set_episode_context(display_ep, phase=f"Phase {active_phase}")       
         env.set_curriculum_progress(episodes_completed / max_episodes)
 
-        print(f"🚀 Starting Phase {active_phase} - Episode {display_ep} on {env.current_map}")
+        print(f"Starting Phase {active_phase} - Episode {display_ep} on {env.current_map}")
 
         _prepare_train_episode(env, episodes_completed, max_episodes)
         state = env.reset()
@@ -327,7 +345,7 @@ def train(env, agent, max_episodes=2000):
     filename = f"ppo_ep{max_episodes}_best_stage{env.ACTIVE_PHASE}_{timestamp}_sr{success_rate:.2f}.pt"
     final_save_path = os.path.join(best_model_dir, filename)
     torch.save(agent.policy.state_dict(), final_save_path)
-    print(f"✅ Phase {env.ACTIVE_PHASE} Complete. Model saved securely as: {final_save_path}")
+    print(f"Phase {env.ACTIVE_PHASE} Complete. Model saved securely as: {final_save_path}")
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="PPO training with Auto-Continue.")
@@ -340,10 +358,10 @@ if __name__ == "__main__":
 
     env = DroneEnv(visualize_target=not cli.no_visualize_target, ip=cli.airsim_ip, port=cli.airsim_port, vehicle_name=cli.vehicle_name)
     try:
-        print("\n--- 🗺️ Starting First Simulator Instance ---")
+        print("\n--- Starting First Simulator Instance ---")
         success = env.switch_map("T1_OpenUrbanGrid", force=True)
         if not success: raise ConnectionError("Failed to launch AirSim .exe")
-        print("✅ Environment is active. Training will begin shortly...")
+        print("Environment is active. Training will begin shortly...")
         time.sleep(2)
     except Exception as exc:
         raise ConnectionError(f"AirSim startup failed: {exc}") from exc
@@ -356,25 +374,21 @@ if __name__ == "__main__":
         loaded_state = torch.load(pretrain_path, map_location=agent.device)
         agent.policy.load_state_dict(loaded_state)
         agent.policy_old.load_state_dict(loaded_state)
-        print(f"✅ Successfully loaded pretrained weights!")
+        print(f"Successfully loaded pretrained weights!")
 
     model_dir = os.path.join(project_root, "models")
     os.makedirs(model_dir, exist_ok=True)
     torch.save(agent.policy.state_dict(), os.path.join(model_dir, "ppo_initial.pt"))
     
-    # =========================================================
-    # 🚀 AUTOMATIC CONTINUATION LOOP
-    # =========================================================
-    PHASE_TOTALS = {1: 520, 2: 560, 3: 320, 4: 560, 5: 320, 6: 400, 7: 1040, 8: 1640, 9: 1000, 10: 2040, 11: 2560, 12: 3200}
+    PHASE_TOTALS = {1: 520, 2: 560, 3: 320, 4: 560, 5: 320, 6: 400, 7: 1040, 8: 1640, 9: 1620, 10: 2040, 11: 2560, 12: 3200}
     START_PHASE = env.ACTIVE_PHASE
     MAX_PHASE = 12
 
-    print(f"\n{'='*60}\n🚀 INITIATING AUTOMATED PIPELINE (PHASE {START_PHASE} to {MAX_PHASE})\n{'='*60}\n")
+    print(f"\n{'='*60}\nINITIATING AUTOMATED PIPELINE (PHASE {START_PHASE} to {MAX_PHASE})\n{'='*60}\n")
 
     for phase in range(START_PHASE, MAX_PHASE + 1):
         env.ACTIVE_PHASE = phase
         target_episodes = PHASE_TOTALS.get(phase, 500)
-        print(f"\n--- 🌟 STARTING PHASE {phase} ({target_episodes} Episodes) ---")
-        
+        print(f"\n--- STARTING PHASE {phase} ({target_episodes} Episodes) ---")
         train(env, agent, max_episodes=target_episodes)
-        print(f"--- 🏁 PHASE {phase} FINISHED. CONTINUING TO NEXT PHASE... ---\n")
+        print(f"--- PHASE {phase} FINISHED. CONTINUING TO NEXT PHASE... ---\n")
