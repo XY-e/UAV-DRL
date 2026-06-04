@@ -260,5 +260,3 @@ def compute_reward(
             reward -= diagonal_factor * 3.0
 
     return float(min(reward, MAX_STEP_REWARD_PHASE_9_12))
-
-```
