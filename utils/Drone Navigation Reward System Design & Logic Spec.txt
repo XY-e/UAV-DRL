@@ -1,0 +1,122 @@
+================================================================================
+                           DRONE NAVIGATION REWARD SYSTEM
+                                 DESIGN & LOGIC SPEC
+================================================================================
+
+--------------------------------------------------------------------------------
+0. GLOBAL CONFIGURATION & LIMITS
+--------------------------------------------------------------------------------
+PROGRESS_CLIP_M            : 2.0 meters (Max distance delta evaluated per step)
+MAX_STEP_REWARD_PHASE_1_8  : +5.0 (Reward cap to prevent exploitation)
+MAX_STEP_REWARD_PHASE_9_12 : +12.0 (Higher cap for complex maneuvers)
+HOVER_PENALTY_MIN          : 0.5
+HOVER_PENALTY_MAX          : 3.0
+HOVER_RAMP_EP              : 300 (Penalty scales from MIN to MAX over 300 eps)
+
+
+--------------------------------------------------------------------------------
+1. TERMINAL EVENTS (Highest Priority - Applies to All Phases)
+--------------------------------------------------------------------------------
+These conditions immediately end the episode and return a flat reward.
+
+[Event]               [Condition]                            [Reward]
+Goal Reached          Velocity norm < 1.5 m/s (Slow/Safe)    +300.0
+Goal Reached          Velocity norm >= 1.5 m/s (Fast/Hot)    +200.0
+Collision             Drone hits an environmental object     -500.0
+Out of Bounds         Drone breaches XYZ map boundaries      -500.0
+
+
+================================================================================
+                      PHASE 1-8: BASIC FLIGHT & LOCOMOTION
+================================================================================
+INTENT: Teach the drone to stay airborne, face the target, and fly straight 
+without hitting walls in wide-open or simple grid environments.
+Maximum Step Reward Cap: +5.0
+
+A. Obstacle Avoidance (Distance-Based Safety Layer)
+- Critical Front:   d < 1.0m       -> -12.0 penalty
+- Danger Front:     1.0 <= d < 1.5 -> -4.0 * (2.5 - d)
+- Floor Danger:     d < 1.2m       -> -8.0 * (1.2 - d)
+- Floor Proximity:  d < 1.5m       -> -5.0 / (d + 0.05)
+- Side Walls:
+    - Critical:     d < 0.7m       -> -10.0 * (0.7 - d)
+    - Danger:       d < 1.0m       -> -4.0  * (1.0 - d)
+    - Warning:      d < 1.5m       -> -1.5  * (1.5 - d)
+- Proximity Bubble: 2.5 < d < 6.0  -> -20.0 * exp(-0.8 * d) (Applied to all sides)
+
+B. Goal Progress (Primary Signal)
+- Formula: Clipped distance delta (-2m to +2m) multiplied by a dynamic scalar.
+- Scaling: The closer the delta is to max progress (2m), the lower the scalar (ramps from 8.0 down to 2.0) to prevent velocity exploitation.
+
+C. Direction & Velocity Alignment
+- Target Alignment: +1.2 * (Velocity Vector dot Goal Vector).
+- Lateral Penalty:  -0.2 * Lateral Speed * (1.0 - max(alignment, 0)). Punishes sliding sideways when not facing the goal.
+- Vertical Penalty: -0.1 * Vertical Speed * (1.0 - abs(Goal Z)). Punishes climbing/diving if the goal doesn't require it.
+
+D. Corridor Centering
+- Trigger: Active when total corridor width (left + right) < 7.0m.
+- Center Reward: Up to +4.0 based on perfect mathematical center.
+- Off-Center Pen: -1.5 * (offset - 0.35) if offset ratio > 35%.
+- Narrow Pen:     -0.5 * (6.0 - width) if corridor is tighter than 6m.
+
+E. Orientation Stability
+- Pitch: >8 degrees (-1.5 multiplier), >5 degrees (-0.1 multiplier).
+- Roll:  <5 degrees (+0.2 stable bonus), <=8 degrees (-0.1 multiplier), >8 degrees (-1.5 multiplier).
+
+F. Control Smoothness & Environment
+- Action Mag:    -0.05 per step based on raw action size.
+- Action Jitter: -0.10 based on difference from previous step.
+- Wind Drift:    -1.5 * (Velocity dot Wind) if wind > 0.5 m/s and drone is being pushed by it.
+- Time Pressure: -0.03 per step.
+
+================================================================================
+                    PHASE 9-12: ADVANCED URBAN NAVIGATION
+================================================================================
+INTENT: Teach the drone to navigate tight city blocks, perform sharp 90-degree
+turns, brake for obstacles, and fly holonomically.
+Maximum Step Reward Cap: +12.0
+
+A. Phase 9 Curriculum Bridge (Episodes 1 - 200)
+- Blends Phase 1-8 reward logic with Phase 9-12 logic.
+- Starts at 70% old / 30% new at Episode 1, smoothly decaying to 0% old / 100% new by Episode 200.
+
+B. Enhanced Safety & Evasion System
+- Ceiling:      Z < -12.0m (Phase 9) or -7.2m (Others) -> -8.0 * absolute overrun.
+- Floor:        Z < 1.2m -> -8.0 * (1.2 - d).
+- Auto-Brake:   Front < 4.0m AND moving forward > 1.4 m/s -> -5.0 * velocity * (4.0 - d).
+- Side Walls:   Strict tolerances. <1.0m (-15.0 multiplier), <2.0m (-8.0 multiplier), <2.5m (-2.0 multiplier).
+- Front Evasion (Dynamic Obstacles):
+    - When an obstacle is <7m ahead:
+        - Climbing (>0.15 m/s): Up to +8.0 reward.
+        - Sinking  (<-0.1 m/s): -4.0 penalty.
+        - Doing neither:        -2.0 penalty.
+- Front Standard: < 1.5m (-12.0 penalty), < 2.5m (-5.0 * (2.5 - d)).
+
+C. Intersection Transit Control
+- Entry Bonus:     +4.0 exactly once upon entering intersection boundaries.
+- Speed Control:   If inside, moving 0.3 to 1.2 m/s grants +3.0/step.
+- Speed Penalty:   If inside, moving > 1.6 m/s grants -2.0 * velocity.
+
+D. Anti-Hovering (Locomotion Enforcement)
+- Trigger: Velocity < 0.55 m/s while > 3.0m away from the target.
+- Intersection: -0.4 penalty (allows mild slowing for turns).
+- Open Road:    Dynamic penalty scaling from -0.5 up to -3.0 over the first 300 episodes of the phase.
+
+E. Holonomic Locomotion & Alignment
+- Alignment: Calculates dot product of velocity and goal vectors.
+- Phase 12 Boost: If alignment > 0.85 AND front clear (>8m) AND far from goal (>15m) -> +3.0 * alignment * min(vel, 2.5).
+- Standard Boost: +1.5 * alignment * min(vel, 2.0).
+- Diagonal Pen:   Prevents "corner cutting" by penalizing simultaneous high X and Y velocity: -3.0 * (vx * vy) if product > 0.15.
+
+F. Orientation & Smoothness (Strict Mode)
+- Yaw Lock:      Strict penalty if yaw deviates > 0.1 radians (-5.0 * yaw).
+- Pitch & Roll:  Same mathematical bounds as Phase 1-8.
+- Action Mag:    -0.05 per step.
+- Action Jitter: -0.15 per step (Stricter than Phase 1-8).
+
+G. Lateral/Vertical Correction & Environment
+- Lateral Slide: -0.2 * lateral speed * (1.0 - max(alignment, 0)).
+- Vert Drift:    -0.1 * vertical speed * (1.0 - abs(Goal Z)) (Disabled during dynamic obstacle evasion).
+- Wind Drift:    Same mathematical bounds as Phase 1-8.
+- Time Pressure: -0.12 (Phase 12) or -0.07 (Phase 9-11).
+- Rebate:        +0.04 returned in Phase 12 if cruising fast and accurately in open space.
