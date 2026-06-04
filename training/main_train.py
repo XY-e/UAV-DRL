@@ -254,21 +254,6 @@ def train(env, agent, max_episodes=2000):
                 if episodes_completed % 40 == 0 or 'current_phase_map' not in locals():
                     current_phase_map = random.choices(["T1_OpenUrbanGrid", "T2_MediumCityBlocks", "T3_Wind"], weights=[0.20, 0.30, 0.50])[0]
                 target_map = current_phase_map
-        elif active_phase == 10:
-            if episodes_completed < 1560:
-                target_map = "T3_Wind"
-            else:
-                target_map = random.choices(["T1_OpenUrbanGrid", "T2_MediumCityBlocks", "T3_Wind"], weights=[0.12, 0.24, 0.64])[0]
-        elif active_phase == 11:
-            if episodes_completed < 1920:
-                target_map = "T3_Wind"
-            else:
-                target_map = random.choices(["T1_OpenUrbanGrid", "T2_MediumCityBlocks", "T3_Wind"], weights=[0.12, 0.24, 0.64])[0]
-        elif active_phase == 12:
-            if episodes_completed < 2400:
-                target_map = "T3_Wind"
-            else:
-                target_map = random.choices(["T1_OpenUrbanGrid", "T2_MediumCityBlocks", "T3_Wind"], weights=[0.12, 0.24, 0.64])[0]
 
         if env.current_map != target_map or episodes_completed == 0:
             if env.current_map != target_map:
@@ -380,9 +365,9 @@ if __name__ == "__main__":
     os.makedirs(model_dir, exist_ok=True)
     torch.save(agent.policy.state_dict(), os.path.join(model_dir, "ppo_initial.pt"))
     
-    PHASE_TOTALS = {1: 520, 2: 560, 3: 320, 4: 560, 5: 320, 6: 400, 7: 1040, 8: 1640, 9: 1620, 10: 2040, 11: 2560, 12: 3200}
+    PHASE_TOTALS = {1: 520, 2: 560, 3: 320, 4: 560, 5: 320, 6: 400, 7: 1040, 8: 1640, 9: 1620}
     START_PHASE = env.ACTIVE_PHASE
-    MAX_PHASE = 12
+    MAX_PHASE = 9
 
     print(f"\n{'='*60}\nINITIATING AUTOMATED PIPELINE (PHASE {START_PHASE} to {MAX_PHASE})\n{'='*60}\n")
 
