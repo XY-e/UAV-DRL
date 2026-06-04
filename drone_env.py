@@ -1,4 +1,3 @@
-
 import airsim
 import numpy as np
 import random
@@ -11,11 +10,7 @@ from utils.action_clipping import clip_action
 from gymnasium import spaces
 
 class DroneEnv:
-    # Default name must match AirSim settings.json for that simulator instance.
     DEFAULT_VEHICLE_NAME = "Drone1"
-
-    # --- UPDATE THESE PATHS ---
-    # Using your folder structure from the image
     BASE_MAP_PATH = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), "map")
     
     EXE_PATHS = {
@@ -24,89 +19,53 @@ class DroneEnv:
         "T3_Wind": os.path.join(BASE_MAP_PATH, "T3_Wind", "WindowsNoEditor", "Blocks.exe")
     }
 
-    def __init__(
-        self,
-        visualize_target=True,
-        ip="127.0.0.1",
-        port=41451,
-        vehicle_name=None,
-    ):
+    def __init__(self, visualize_target=True, ip="127.0.0.1", port=41451, vehicle_name=None):
         self.vehicle_name = vehicle_name or self.DEFAULT_VEHICLE_NAME
         self.rpc_port = int(port)
-        ip_resolved = ip or "127.0.0.1"
-        self.airsim_ip = ip_resolved
-        # # If switch map is on
+        self.airsim_ip = ip or "127.0.0.1"
         self.client = None
 
         self.visualize_target = visualize_target
         self.curriculum_progress = 1.0
-        # Bootstrap with a fixed goal for early training, then switch to curriculum.
-        # Target at X=8 straight down the forward corridor (confirmed clear path in Blocks map).
-        # 0.40 = first ~40% of max_episodes (e.g. 400/1000) on fixed goal for stronger success signal.
         self.fixed_target = np.array([8.0, 0.0, -5.0], dtype=np.float32)
         self.fixed_target_until_progress = 0.0
 
-        # Scenario information
         self.scenario_id = "SCN-URB"
         self.scenario_name = "AirSim Urban Environment"
         self.current_map = ""
         self._set_boundary_limits()
 
-        # ==========================================
-        # CURRICULUM PHASE TOGGLE 
-        # Change this to 1, 2, 3, or 4 to swap phases
-        # ==========================================
         self.ACTIVE_PHASE = 9  
         self.start_x = 0.0
         self.start_y = 0.0
         self.start_z = -5.0
 
-        # Episode tracking
         self.previous_distance = None
         self.current_step = 0
         self.current_episode = 0
         self.current_phase = "train"
-        self.max_steps = 200  
+        self.max_steps = 200 
 
-        # Target position
         self.target = np.array([0.0, 0.0, -5.0])
-
-        # Wind
         self.enable_wind = True
         self.wind_strength = 1.5
         self.wind = np.zeros(3, dtype=np.float32)
-
-        # Goal success threshold
         self.goal_threshold = 3.0
-
-        # Action limits
         self.max_velocity = 2.0
-
-        # Step duration
         self.step_duration = 0.15
         self.visualize_sensor_ray = visualize_target
-        # Sensor names must match those defined in AirSim settings.json.
-        # Aggregated by nearest valid reading — covers front, left, right, and down.
+
         self.distance_sensor_names = ["Distance", "DistanceLeft", "DistanceRight", "DistanceBack", "DistanceDown"]
         self.distance_sensor_max_range = 40.0
         self._warned_distance_sensor_error = False
         self._warned_distance_sensor_invalid = False
         self._warned_missing_distance_sensors = set()
         
-        # Cache obstacle readings to avoid duplicate sensor calls within one step
         self._cached_obstacle_dist = self.distance_sensor_max_range
         self._cached_sensor_readings = {}
  
-        self.observation_space = spaces.Box(
-            low=-np.inf, 
-            high=np.inf, 
-            shape=(26,), 
-            dtype=np.float32  
-        )
+        self.observation_space = spaces.Box(low=-np.inf, high=np.inf, shape=(26,), dtype=np.float32)
 
-        # ==========================================
-        # 📊 CONTINUOUS PATH & HOVER PERFORMANCE TRACKERS
-        # ==========================================
         self.hover_counter = 0
         self.continuous_start_x = None
         self.continuous_start_y = None
@@ -114,39 +73,25 @@ class DroneEnv:
         self.prev_in_intersection = False
 
     def _set_boundary_limits(self):
-            """Update safety boundaries based on the screenshot map names."""
-            
-            # Check for Map 3 specifically
-            if "T3_Wind" in self.current_map:
-                # Map 3: X = -34.0 to 130.0, Y = -65.0 to 65.0
-                self.x_min, self.x_max = -15.0, 170.0
-                self.y_min, self.y_max = -110.0, 110.0
-                # self.z_min, self.z_max = -8.5, -1.5
-                self.z_min, self.z_max = -12.0, -1.5
-                self.safety_distance = 7.0
-                print(f"🌐 Boundaries updated for T3_Wind:")
-                print(f"   X: {self.x_min} to {self.x_max}m | Y: {self.y_min} to {self.y_max}m | Z: {self.z_min} to {self.z_max}m")
-                
-            elif "T2_MediumCityBlocks" in self.current_map:
-                # Map 2: X = -22.0 to 65.0, Y = -54.0 to 54.0
-                self.x_min, self.x_max = -22.0, 65.0
-                self.y_min, self.y_max = -54.0, 54.0
-                # self.z_min, self.z_max = -8.5, -1.5
-                self.z_min, self.z_max = -12.0, -1.5
-                self.safety_distance = 5.0
-                print(f"🏙️ Boundaries updated for T2_City:")
-                print(f"   X: {self.x_min} to {self.x_max}m | Y: {self.y_min} to {self.y_max}m | Z: {self.z_min} to {self.z_max}m")
-                
-            else:
-                # Default for T1_OpenUrbanGrid (Map 1)
-                # Map 1: X = -15.0 to 42.0, Y = -11.0 to 12.0
-                self.x_min, self.x_max = -15.0, 42.0
-                self.y_min, self.y_max = -11.0, 12.0
-                # self.z_min, self.z_max = -8.5, -1.5
-                self.z_min, self.z_max = -12.0, -1.5
-                self.safety_distance = 5.0
-                print(f"⬜ Boundaries set for T1_Grid:")
-                print(f"   X: {self.x_min} to {self.x_max}m | Y: {self.y_min} to {self.y_max}m | Z: {self.z_min} to {self.z_max}m")
+        """Update safety boundaries based on the current map."""
+        if "T3_Wind" in self.current_map:
+            self.x_min, self.x_max = -15.0, 170.0
+            self.y_min, self.y_max = -110.0, 110.0
+            self.z_min, self.z_max = -14.0, -1.5
+            self.safety_distance = 7.0
+            print(f"🌐 Boundaries updated for T3_Wind: X: {self.x_min} to {self.x_max}m | Y: {self.y_min} to {self.y_max}m | Z: {self.z_min} to {self.z_max}m")
+        elif "T2_MediumCityBlocks" in self.current_map:
+            self.x_min, self.x_max = -22.0, 65.0
+            self.y_min, self.y_max = -54.0, 54.0
+            self.z_min, self.z_max = -12.0, -1.5
+            self.safety_distance = 5.0
+            print(f"🏙️ Boundaries updated for T2_City: X: {self.x_min} to {self.x_max}m | Y: {self.y_min} to {self.y_max}m | Z: {self.z_min} to {self.z_max}m")
+        else:
+            self.x_min, self.x_max = -15.0, 42.0
+            self.y_min, self.y_max = -11.0, 12.0
+            self.z_min, self.z_max = -12.0, -1.5
+            self.safety_distance = 5.0
+            print(f"⬜ Boundaries set for T1_Grid: X: {self.x_min} to {self.x_max}m | Y: {self.y_min} to {self.y_max}m | Z: {self.z_min} to {self.z_max}m")
 
     def _is_safe_start_state(self):
         """Validate startup state to reduce immediate OOB/reset episodes."""
@@ -154,10 +99,8 @@ class DroneEnv:
         collision = self.client.simGetCollisionInfo(vehicle_name=self.vehicle_name).has_collided
         pos = state.kinematics_estimated.position
         vel = state.kinematics_estimated.linear_velocity
-
         speed = float(np.linalg.norm([vel.x_val, vel.y_val, vel.z_val]))
         
-        # 🚀 FIX: Check against dynamic start coordinates, not 0,0
         near_start_xy = abs(pos.x_val - self.start_x) < 2.0 and abs(pos.y_val - self.start_y) < 2.0
         z_in_band = self.z_min <= float(pos.z_val) <= self.z_max
         
@@ -166,12 +109,6 @@ class DroneEnv:
     def set_curriculum_progress(self, progress):
         """Set normalized training progress in [0, 1] for target curriculum."""
         self.curriculum_progress = float(np.clip(progress, 0.0, 1.0))
-        # Success-radius curriculum: keep 2.5 m gate longer, then tighten.
-        # Goal Threshold Curriculum
-        # if self.curriculum_progress < 0.40:
-        #     self.goal_threshold = 2.0
-        # elif self.curriculum_progress < 0.75:
-        #     self.goal_threshold = 2.5
         if self.curriculum_progress < 0.75:
             self.goal_threshold = 2.5
         else:
@@ -184,17 +121,12 @@ class DroneEnv:
 
     def _sample_target(self):
         ep = self.current_episode
-        
-        # Default failsafes
         dist_min, dist_max, self.max_steps = 10.0, 15.0, 500
         tz = random.uniform(-6.0, -4.0)
 
         map1_branch = None
         map2_branch = None
 
-        # =========================================================
-        # 🎯 TARGET DISTANCE & ALTITUDE CURRICULUM (5 PHASES)
-        # =========================================================
         if self.ACTIVE_PHASE == 1:
             tz = random.uniform(-6.0, -4.0)
             if ep <= 80: dist_min, dist_max, self.max_steps = 5.0, 10.0, 350
@@ -204,12 +136,12 @@ class DroneEnv:
             else: dist_min, dist_max, self.max_steps = 20.0, 25.0, 1000
 
         elif self.ACTIVE_PHASE == 2:
-            tz = random.uniform(-10.0, -8.0) # High Altitude
+            tz = random.uniform(-10.0, -8.0) 
             if ep <= 280: dist_min, dist_max, self.max_steps = 10.0, 20.0, 800
             else: dist_min, dist_max, self.max_steps = 15.0, 25.0, 1000
 
         elif self.ACTIVE_PHASE == 3:
-            tz = random.uniform(-10.0, -8.0) # High Altitude
+            tz = random.uniform(-10.0, -8.0) 
             if ep <= 80:
                 dist_min, dist_max, self.max_steps = 10.0, 30.0, 1800
             elif ep <= 200:
@@ -256,11 +188,69 @@ class DroneEnv:
             map2_branch = random.choices(["left", "right", "front", "back"], weights=[0.25, 0.25, 0.25, 0.25])[0]
             
         elif self.ACTIVE_PHASE == 9:
-            tz = random.uniform(-6.0, -4.0)
-            dist_min, dist_max = 10.0, 200.0
-            map1_branch = random.choices(["front", "back"], weights=[0.5, 0.5])[0]
-            map2_branch = random.choices(["left", "right", "front", "back"], weights=[0.25, 0.25, 0.25, 0.25])[0]
-            self.max_steps = 3000 if ep <= 200 else 4000
+            tz = random.uniform(-10.0, -8.0)
+            
+            # PART 1: Straight Approach (Ep 1 - 220)
+            if ep <= 220:
+                block_idx = (ep - 1) // 20
+                tx = 90.0 + (block_idx * 3.0)
+                ty = 0.0
+                self.max_steps = int(1000 + (tx * 25))
+                return np.array([tx, ty, tz], dtype=np.float32)
+                
+            # PART 2: Left & Right Turn Focus (Ep 221 - 1220)
+            elif ep <= 1220:
+                turn_ep = ep - 220
+                if turn_ep <= 400:
+                    block_idx = (turn_ep - 1) // 20
+                    is_right = (block_idx % 2 == 1)
+                    distance_idx = block_idx // 2
+                    turn_distance = 3.0 + (distance_idx * 3.0)
+                elif turn_ep <= 640:
+                    sub_ep = turn_ep - 400
+                    block_idx = (sub_ep - 1) // 40
+                    is_right = (block_idx % 2 == 1)
+                    distance_idx = block_idx // 2
+                    turn_distance = 33.0 + (distance_idx * 3.0)
+                else:
+                    sub_ep = turn_ep - 640
+                    block_idx = (sub_ep - 1) // 60
+                    is_right = (block_idx % 2 == 1)
+                    distance_idx = block_idx // 2
+                    turn_distance = 42.0 + (distance_idx * 3.0)
+                    
+                tx = 120.0
+                ty = turn_distance if is_right else -turn_distance
+                total_path = 50.0 + turn_distance
+                self.max_steps = int(1000 + (total_path * 25))
+                return np.array([tx, ty, tz], dtype=np.float32)
+                
+            # PART 3: Comprehensive Mixed Maps (Ep 1221 - 1620)
+            else:
+                dist_min, dist_max = 10.0, 200.0
+                self.max_steps = 4000
+                map1_branch = random.choices(["front", "back"], weights=[0.20, 0.80])[0]
+                map2_branch = random.choices(["left", "right", "front", "back"], weights=[0.25, 0.25, 0.25, 0.25])[0]
+                
+                if "T3_Wind" in self.current_map:
+                    choices = ['vr2_back', 'vr2_front', 'hr2_left', 'hr2_right', 'hr1.1_left', 'hr1.1_right']
+                    weights = [0.15, 0.15, 0.15, 0.15, 0.20, 0.20]
+                    chosen_branch = random.choices(choices, weights=weights)[0]
+                    
+                    boxes = {
+                        "vr2_back": (17.8, 68.0, -3.0, 3.0),
+                        "vr2_front": (72.0, 161.8, -3.0, 3.0),
+                        "hr2_left": (65.2, 71.2, -102.5, -2.0),
+                        "hr2_right": (65.2, 71.2, 2.0, 102.5),
+                        "hr1.1_left": (117.0, 123.0, -48.0, -20.0),
+                        "hr1.1_right": (117.0, 123.0, 20.0, 48.0)
+                    }
+                    
+                    c = 2.0
+                    xmin, xmax, ymin, ymax = boxes[chosen_branch]
+                    tx = random.uniform(xmin + c, xmax - c)
+                    ty = random.uniform(ymin + c, ymax - c)
+                    return np.array([tx, ty, tz], dtype=np.float32)
 
         elif self.ACTIVE_PHASE in [10, 11, 12]:
             tz = random.uniform(-6.0, -4.0)
@@ -317,10 +307,6 @@ class DroneEnv:
                 elif ep <= 280: chosen_branch = 'hr2_right'
                 elif ep <= 760: chosen_branch = 'hr1_left'
                 elif ep <= 1240: chosen_branch = 'hr1_right'
-                else: chosen_branch = random.choices(['vr2_back', 'vr2_front', 'hr2_left', 'hr2_right', 'hr1_left', 'hr1_right'], [0.15, 0.15, 0.15, 0.15, 0.20, 0.20])[0]
-            elif self.ACTIVE_PHASE == 9:
-                if ep <= 200: chosen_branch = random.choices(['vr2_back', 'vr2_front', 'hr2_left', 'hr2_right'], [0.25, 0.25, 0.25, 0.25])[0]
-                elif ep <= 600: chosen_branch = random.choices(['hr1_left', 'hr1_right'], [0.50, 0.50])[0]
                 else: chosen_branch = random.choices(['vr2_back', 'vr2_front', 'hr2_left', 'hr2_right', 'hr1_left', 'hr1_right'], [0.15, 0.15, 0.15, 0.15, 0.20, 0.20])[0]
             elif self.ACTIVE_PHASE == 10:
                 if ep <= 780: chosen_branch = 'vr1_2'
@@ -392,8 +378,8 @@ class DroneEnv:
         self.start_x, self.start_y = 0.0, 0.0
         self.start_z = -5.0
 
-        if self.ACTIVE_PHASE in [2, 3]:
-            self.start_z = -9.0 
+        if self.ACTIVE_PHASE in [2, 3, 9]:
+            self.start_z = -9.0
             
         if self.ACTIVE_PHASE == 2 and "T2_MediumCityBlocks" in self.current_map:
             if random.random() < 0.5:
@@ -407,15 +393,12 @@ class DroneEnv:
                 self.start_y = self.continuous_start_y
             else:
                 self.start_x, self.start_y = 70.0, 0.0
-        
-        
-        # 🚀 FIX: Convert variables into native Python floats inside Vector3r to stop the crash
+
         start_pose = airsim.Pose(airsim.Vector3r(float(self.start_x), float(self.start_y), float(self.start_z)), airsim.to_quaternion(0, 0, 0))
         self.client.simSetVehiclePose(start_pose, True, vehicle_name=self.vehicle_name)
         time.sleep(0.4)
         
         self.client.armDisarm(True, vehicle_name=self.vehicle_name)
-        # 🚀 FIX: Apply float conversions to the flight navigation coordinates here as well
         self.client.moveToPositionAsync(float(self.start_x), float(self.start_y), float(self.start_z), 3, timeout_sec=2, vehicle_name=self.vehicle_name).join()
 
         self.client.rotateToYawAsync(0.0, timeout_sec=1, vehicle_name=self.vehicle_name).join()
@@ -510,17 +493,20 @@ class DroneEnv:
             elif 601 <= ep <= 760 or 1081 <= ep <= 1240:
                 active_strength = random.uniform(0.8, 1.0)
         elif self.ACTIVE_PHASE == 9:
-            if ep <= 200:
-                if random.random() < 0.50: self.enable_wind = False
-                else: active_strength = random.uniform(0.3, 0.5)
-            elif ep <= 600:
-                if ep <= 330:
-                    if random.random() < 0.50: self.enable_wind = False
-                    else: active_strength = random.uniform(0.3, 0.5)
-                elif ep <= 460:
-                    active_strength = random.uniform(0.5, 0.8)
-                else:
-                    active_strength = random.uniform(0.8, 1.0)
+            if ep <= 220:
+                progress = ep / 220.0
+            elif ep <= 1220:
+                progress = (ep - 220) / 1000.0
+            else:
+                progress = 1.0 
+
+            if progress < 0.25:
+                self.enable_wind = False if random.random() < 0.7 else True
+                active_strength = random.uniform(0.1, 0.3)
+            elif progress < 0.60:
+                active_strength = random.uniform(0.3, 0.6)
+            elif progress < 0.90:
+                active_strength = random.uniform(0.6, 0.9)
             else:
                 rand_w = random.random()
                 if rand_w < 0.15: self.enable_wind = False
@@ -591,7 +577,6 @@ class DroneEnv:
         self._prev_raw_action = np.zeros(4, dtype=np.float32)
         return self.get_state()
     
-
     def _draw_target_marker(self):
         """Plot the navigation target in the AirSim world as a visual circle (hitbox ring)."""
         if not self.visualize_target:
@@ -600,61 +585,39 @@ class DroneEnv:
             self.client.simFlushPersistentMarkers()
             tx, ty, tz = float(self.target[0]), float(self.target[1]), float(self.target[2])
             
-            # 1. Use the goal_threshold as the radius of our visual circle
             radius = self.goal_threshold
             points = []
-            num_segments = 32  # Higher number = smoother circle
+            num_segments = 32  
             
-            # 2. Calculate coordinates for a flat, horizontal circle using trig
             for i in range(num_segments + 1):
                 angle = (i / num_segments) * 2 * np.pi
                 px = tx + radius * np.cos(angle)
                 py = ty + radius * np.sin(angle)
                 points.append(airsim.Vector3r(float(px), float(py), float(tz)))
                 
-            # 3. Draw the ring (The exact boundary the drone needs to cross to succeed)
             self.client.simPlotLineStrip(
-                points,
-                color_rgba=[0.0, 1.0, 0.25, 1.0], # Bright Green
-                thickness=5.0,
-                duration=-1.0,
-                is_persistent=True,
+                points, color_rgba=[0.0, 1.0, 0.25, 1.0], thickness=5.0, duration=-1.0, is_persistent=True,
             )
             
-            # 4. Optional: Keep a small dot right in the dead center so it's easy to spot from far away
             center = airsim.Vector3r(tx, ty, tz)
             self.client.simPlotPoints(
-                [center],
-                color_rgba=[0.0, 1.0, 0.25, 0.8],
-                size=10.0,
-                duration=-1.0,
-                is_persistent=True,
+                [center], color_rgba=[0.0, 1.0, 0.25, 0.8], size=10.0, duration=-1.0, is_persistent=True,
             )
-
         except Exception as exc:
             print(f"(visualize_target) Could not draw marker: {exc}")
 
     def _get_obstacle_distance(self):
-        """
-        Read all distance sensors and return (min_distance, sensor_dict).
-        sensor_dict maps sensor_name -> distance reading (or max_range if invalid/missing).
-        """
+        """Read all distance sensors and return (min_distance, sensor_dict)."""
         sensor_readings = {}
         valid_readings = []
         
         for sensor_name in self.distance_sensor_names:
             try:
-                distance_data = self.client.getDistanceSensorData(
-                    distance_sensor_name=sensor_name,
-                    vehicle_name=self.vehicle_name
-                )
+                distance_data = self.client.getDistanceSensorData(distance_sensor_name=sensor_name, vehicle_name=self.vehicle_name)
                 dist = float(distance_data.distance)
                 if not np.isfinite(dist) or dist < 0.0:
                     if not self._warned_distance_sensor_invalid:
-                        print(
-                            "⚠️ Distance sensor returned invalid reading; "
-                            f"using fallback {self.distance_sensor_max_range:.1f}m."
-                        )
+                        print(f"⚠️ Distance sensor returned invalid reading; using fallback {self.distance_sensor_max_range:.1f}m.")
                         self._warned_distance_sensor_invalid = True
                     sensor_readings[sensor_name] = self.distance_sensor_max_range
                     continue
@@ -664,12 +627,8 @@ class DroneEnv:
                 valid_readings.append(clamped)
                 
             except Exception as exc:
-                # Usually means this sensor name is not configured on the vehicle.
                 if sensor_name not in self._warned_missing_distance_sensors:
-                    print(
-                        "⚠️ Distance sensor read failed "
-                        f"(name='{sensor_name}'): {exc}."
-                    )
+                    print(f"⚠️ Distance sensor read failed (name='{sensor_name}'): {exc}.")
                     self._warned_missing_distance_sensors.add(sensor_name)
                 self._warned_distance_sensor_error = True
                 sensor_readings[sensor_name] = self.distance_sensor_max_range
@@ -679,91 +638,45 @@ class DroneEnv:
 
     def _draw_sensor_rays(self, multirotor_state, sensor_readings):
         """Draw color-coded rays for each distance sensor (forward/left/right/down)."""
-        if not self.visualize_sensor_ray:
-            return
-        if sensor_readings is None:
-            return
-        
+        if not self.visualize_sensor_ray or sensor_readings is None: return
         try:
             pos = multirotor_state.kinematics_estimated.position
             orientation = multirotor_state.kinematics_estimated.orientation
             roll, pitch, yaw = airsim.to_eularian_angles(orientation)
-            
             drone_pos = np.array([pos.x_val, pos.y_val, pos.z_val], dtype=np.float32)
             
-            # Sensor direction vectors in body frame (NED: X forward, Y right, Z down)
-            # Then rotate to world frame using yaw/pitch/roll
             cos_y, sin_y = np.cos(yaw), np.sin(yaw)
             cos_p, sin_p = np.cos(pitch), np.sin(pitch)
             
-            # Rotation matrix: body -> world (simplified for small angles)
-            # Forward: body X-axis
-            forward_world = np.array([
-                cos_p * cos_y,
-                cos_p * sin_y,
-                sin_p
-            ], dtype=np.float32)
-
-            # Backward: body -X-axis
+            forward_world = np.array([cos_p * cos_y, cos_p * sin_y, sin_p], dtype=np.float32)
             back_world = -forward_world
-            
-            # Right: body +Y-axis
-            right_world = np.array([
-                -sin_y,
-                cos_y,
-                0.0
-            ], dtype=np.float32)
-
-            # Left: body -Y-axis
+            right_world = np.array([-sin_y, cos_y, 0.0], dtype=np.float32)
             left_world = -right_world
-            
-            # Down: body Z-axis
             down_world = np.array([0.0, 0.0, 1.0], dtype=np.float32)
             
-            # Map sensor names to their direction vectors and colors
             sensor_directions = {
-                "Distance": (forward_world, [0.0, 1.0, 1.0, 0.9]),      # Cyan (front)
-                "DistanceBack": (back_world, [1.0, 0.0, 1.0, 0.9]),   # Magenta (Back) ✅ ADDED!
-                "DistanceLeft": (left_world, [1.0, 1.0, 0.0, 0.9]),     # Yellow (left)
-                "DistanceRight": (right_world, [1.0, 0.5, 0.0, 0.9]),   # Orange (right)
-                "DistanceDown": (down_world, [0.5, 0.0, 1.0, 0.9])      # Purple (down)
+                "Distance": (forward_world, [0.0, 1.0, 1.0, 0.9]),     
+                "DistanceBack": (back_world, [1.0, 0.0, 1.0, 0.9]),   
+                "DistanceLeft": (left_world, [1.0, 1.0, 0.0, 0.9]),     
+                "DistanceRight": (right_world, [1.0, 0.5, 0.0, 0.9]),   
+                "DistanceDown": (down_world, [0.5, 0.0, 1.0, 0.9])      
             }
             
             for sensor_name, reading in sensor_readings.items():
-                if sensor_name not in sensor_directions:
-                    continue
-                
+                if sensor_name not in sensor_directions: continue
                 dist = float(reading)
-                # Skip if sensor returns max-range (no obstacle detected)
-                if dist >= (self.distance_sensor_max_range - 1e-3):
-                    continue
+                if dist >= (self.distance_sensor_max_range - 1e-3): continue
                 
                 direction, base_color = sensor_directions[sensor_name]
-                
-                # Red tint when very close, otherwise use base color
-                if dist < 2.0:
-                    color = [1.0, 0.1, 0.1, 0.95]  # Red
-                elif dist < 4.0:
-                    color = [1.0, 0.3, 0.0, 0.95]  # Orange-red
-                else:
-                    color = base_color
-                
-                # Draw ray from drone to obstacle point
+                color = [1.0, 0.1, 0.1, 0.95] if dist < 2.0 else [1.0, 0.3, 0.0, 0.95] if dist < 4.0 else base_color
                 end = drone_pos + (direction * dist)
                 
                 self.client.simPlotLineStrip(
-                    [
-                        airsim.Vector3r(float(drone_pos[0]), float(drone_pos[1]), float(drone_pos[2])),
-                        airsim.Vector3r(float(end[0]), float(end[1]), float(end[2])),
-                    ],
-                    color_rgba=color,
-                    thickness=2.5,
-                    duration=0.15,
-                    is_persistent=False,
+                    [airsim.Vector3r(float(drone_pos[0]), float(drone_pos[1]), float(drone_pos[2])),
+                     airsim.Vector3r(float(end[0]), float(end[1]), float(end[2]))],
+                    color_rgba=color, thickness=2.5, duration=0.15, is_persistent=False,
                 )
-        
         except Exception as exc:
-            # Non-fatal visualization path.
             if self.current_step % 100 == 0:
                 print(f"(sensor_rays) Could not draw sensor rays: {exc}")
         
@@ -776,59 +689,26 @@ class DroneEnv:
         orientation = state.kinematics_estimated.orientation
         angular_vel = state.kinematics_estimated.angular_velocity
 
-        # AirSim returns radians
         roll, pitch, yaw = airsim.to_eularian_angles(orientation)
 
-        # --- HEADING ERROR CALCULATION ---
-        # 1. Angle from drone to target in world frame
         dx = self.target[0] - pos.x_val
         dy = self.target[1] - pos.y_val
-        target_angle = np.arctan2(dy, dx)
         
-        # 2. Difference between target angle and drone's current yaw
-        heading_error = target_angle - yaw
-        
-        # 3. Smooth representation using trig
-        
-        # heading_obs = np.array([np.cos(heading_error), np.sin(heading_error)], dtype=np.float32)
-        
-        # holonomic control 
         heading_obs = np.array([
             dx / (np.linalg.norm([dx, dy]) + 1e-6),
             dy / (np.linalg.norm([dx, dy]) + 1e-6)
         ], dtype=np.float32)
-        # ----------------------------------
 
-        position = np.array([
-            pos.x_val,
-            pos.y_val,
-            pos.z_val
-        ], dtype=np.float32)
-
-        linear_velocity = np.array([
-            vel.x_val,
-            vel.y_val,
-            vel.z_val
-        ], dtype=np.float32)
-
-        orientation_values = np.array([
-            roll,
-            pitch,
-            yaw
-        ], dtype=np.float32)
-
-        angular_velocity = np.array([
-            angular_vel.x_val,
-            angular_vel.y_val,
-            angular_vel.z_val
-        ], dtype=np.float32)
+        position = np.array([pos.x_val, pos.y_val, pos.z_val], dtype=np.float32)
+        linear_velocity = np.array([vel.x_val, vel.y_val, vel.z_val], dtype=np.float32)
+        orientation_values = np.array([roll, pitch, yaw], dtype=np.float32)
+        angular_velocity = np.array([angular_vel.x_val, angular_vel.y_val, angular_vel.z_val], dtype=np.float32)
 
         goal_delta = (self.target - position).astype(np.float32)
 
         obstacle_dist, sensor_readings = self._get_obstacle_distance()
         self._draw_sensor_rays(state, sensor_readings)
         
-        # Cache for step() to avoid duplicate sensor call
         self._cached_obstacle_dist = obstacle_dist
         self._cached_sensor_readings = sensor_readings
         
@@ -840,10 +720,7 @@ class DroneEnv:
             sensor_readings.get("DistanceDown", 20.0)
         ], dtype=np.float32)
 
-        collision = np.array([
-            1.0 if collision_info.has_collided else 0.0
-        ], dtype=np.float32)
-
+        collision = np.array([1.0 if collision_info.has_collided else 0.0], dtype=np.float32)
         wind_state = self.wind.astype(np.float32)
 
         return np.concatenate([
@@ -851,7 +728,7 @@ class DroneEnv:
             linear_velocity,    # 3
             orientation_values, # 3
             angular_velocity,   # 3
-            sensor_values,      # 5 (Changed from 1 to 5)
+            sensor_values,      # 5
             goal_delta,         # 3
             wind_state,         # 3
             collision,          # 1
@@ -859,61 +736,34 @@ class DroneEnv:
         ])                      # Total: 26 elements
 
     def get_position(self):
-        """
-        Return current drone position as numpy array.
-        """
-
         state = self.client.getMultirotorState(vehicle_name=self.vehicle_name)
         pos = state.kinematics_estimated.position
-
-        return np.array([
-            pos.x_val,
-            pos.y_val,
-            pos.z_val
-        ])
+        return np.array([pos.x_val, pos.y_val, pos.z_val])
 
     def get_distance_to_target(self):
-        """
-        Return Euclidean distance between drone and target.
-        """
-
         position = self.get_position()
         return np.linalg.norm(position - self.target)
 
     def is_out_of_bounds(self):
             pos = self.get_position()
             x, y, z = pos[0], pos[1], pos[2]
-
-            if x < self.x_min or x > self.x_max:
-                return True
-            if y < self.y_min or y > self.y_max:
-                return True
-            if z < self.z_min or z > self.z_max:
-                return True
+            if x < self.x_min or x > self.x_max: return True
+            if y < self.y_min or y > self.y_max: return True
+            if z < self.z_min or z > self.z_max: return True
             return False
 
     def has_collision(self):
-        """
-        Check AirSim collision flag.
-        """
-
         collision_info = self.client.simGetCollisionInfo(vehicle_name=self.vehicle_name)
         return collision_info.has_collided
 
-
     def step(self, action):
         self.current_step += 1
-
-        # Calculate action jitter delta before clipping
         action_change = float(np.linalg.norm(action - self._prev_raw_action))
         self._prev_raw_action = action.copy()
 
         action = clip_action(action)
         action = action.astype(np.float32, copy=False)
 
-        # ============================================================
-        # 🛡️ STABILITY ASSIST SYSTEM
-        # ============================================================
         vx, vy, vz, yaw_rate = float(action[0]), float(action[1]), float(action[2]), float(action[3])
         state = self.client.getMultirotorState(vehicle_name=self.vehicle_name)
         linear_vel = state.kinematics_estimated.linear_velocity
@@ -924,13 +774,13 @@ class DroneEnv:
         current_speed = np.linalg.norm([linear_vel.x_val, linear_vel.y_val, linear_vel.z_val])
         rotation_speed = np.linalg.norm([angular_vel.x_val, angular_vel.y_val, angular_vel.z_val])
 
-        # Deadzone filter
         if abs(vx) < 0.15: vx = 0.0
         if abs(vy) < 0.15: vy = 0.0
         if abs(vz) < 0.12: vz = 0.0
-        if abs(yaw_rate) < 1.0: yaw_rate = 0.0
 
-        # Hover Stabilizer
+        if abs(vx) > abs(vy): vy = 0.0 
+        elif abs(vy) > abs(vx): vx = 0.0 
+
         current_pos = state.kinematics_estimated.position
         if current_pos.z_val < -3.0:
             if current_speed < 1.5:
@@ -940,13 +790,11 @@ class DroneEnv:
             if rotation_speed > 0.4:
                 yaw_rate *= 0.5
 
-        # Tilt limits
         tilt_penalty_y = 1.0 - min(abs(roll), 0.6) / 0.6
         vy *= tilt_penalty_y
         tilt_penalty_x = 1.0 - min(abs(pitch), 0.6) / 0.6
         vx *= tilt_penalty_x
 
-        # Action Smoothing
         if not hasattr(self, "_prev_action"):
             self._prev_action = np.zeros(4, dtype=np.float32)
         current_action = np.array([vx, vy, vz, yaw_rate], dtype=np.float32)
@@ -958,7 +806,7 @@ class DroneEnv:
         vx = float(np.clip(vx, -2.2, 2.2))
         vy = float(np.clip(vy, -2.2, 2.2))
         vz = float(np.clip(vz, -1.5, 1.5))
-        yaw_rate = float(np.clip(yaw_rate, -25.0, 25.0))
+        yaw_rate = 0.0
 
         if self.enable_wind:
             self.client.simSetWind(airsim.Vector3r(*self.wind.tolist()))
@@ -969,7 +817,6 @@ class DroneEnv:
             vehicle_name=self.vehicle_name,
         ).join()
 
-        # Telemetry updates
         multirotor_state = self.client.getMultirotorState(vehicle_name=self.vehicle_name)
         pos = multirotor_state.kinematics_estimated.position  
         vel = multirotor_state.kinematics_estimated.linear_velocity
@@ -987,9 +834,6 @@ class DroneEnv:
         if self.current_step % 50 == 0:
             print(f"Step: {self.current_step:3} | Dist: {distance:5.2f}m | Obs: {obstacle_dist:5.2f}m")
         
-        # =========================================================
-        # 🗺️ MAP CONTEXT DETECTORS (For Phase 9+ Turning Windows)
-        # =========================================================
         in_intersection = False
         dyn_obs_ahead = False
         
@@ -1017,13 +861,12 @@ class DroneEnv:
         self.prev_in_intersection = in_intersection
         done = False
 
-        # Anti-Hover Timeout (Solves 5x training deceleration bug)
         if current_speed < 0.4 and distance > 3.5:
             self.hover_counter += 1
         else:
             self.hover_counter = 0
 
-        if self.hover_counter > 100:  # ~15 seconds of immobility = terminate
+        if self.hover_counter > 100: 
             done = True
             print("Hover timeout triggered! Agent cleared to prevent step starvation.")
 
@@ -1040,20 +883,9 @@ class DroneEnv:
             done = True
             print("Max steps reached!")
         
-        # if done:
-        #     self.client.hoverAsync(vehicle_name=self.vehicle_name).join()
-        #     # Cache positions for next path step if arriving safely
-        #     if distance < self.goal_threshold:
-        #         self.continuous_start_x = self.target[0]
-        #         self.continuous_start_y = self.target[1]
-        #     else:
-        #         self.continuous_start_x = 70.0
-        #         self.continuous_start_y = 0.0
         if done:
             self.client.hoverAsync(vehicle_name=self.vehicle_name).join()
-            # Cache positions for next path step if arriving safely
             if distance < self.goal_threshold:
-                # 🚀 FIX: Wrap inside float() to convert from NumPy to native Python floats
                 self.continuous_start_x = float(self.target[0])
                 self.continuous_start_y = float(self.target[1])
             else:
@@ -1089,7 +921,8 @@ class DroneEnv:
             "active_phase": self.ACTIVE_PHASE,
             "inside_intersection": in_intersection,
             "just_entered_intersection": just_entered,
-            "dynamic_obs_ahead": dyn_obs_ahead
+            "dynamic_obs_ahead": dyn_obs_ahead,
+            "current_episode": self.current_episode,
         }
 
         self.previous_distance = distance
@@ -1101,22 +934,13 @@ class DroneEnv:
             return True
 
         print(f"\n--- 🛑 RELAY: Closing current EXE and starting {map_name} ---")
-        
-        # 1. Kill the current instance
-        # The /T flag ensures all child processes of the EXE are also killed
         os.system("taskkill /F /IM Blocks.exe /T >nul 2>&1")
         time.sleep(8) 
 
-        # 2. Get the specific path for the map
         exe_path = self.EXE_PATHS.get(map_name)
-        
-        # 3. Launch the new EXE
-        # creationflags=subprocess.CREATE_NEW_CONSOLE keeps the simulator 
-        # output in its own window so it doesn't clutter your training logs
         subprocess.Popen([exe_path], creationflags=subprocess.CREATE_NEW_CONSOLE)
         time.sleep(5)
 
-        # 4. Connect and Sync
         for attempt in range(1, 31):
             try:
                 self.client = airsim.MultirotorClient(self.airsim_ip, self.rpc_port)
@@ -1131,4 +955,3 @@ class DroneEnv:
             except Exception:
                 time.sleep(5)
         return False
-    
